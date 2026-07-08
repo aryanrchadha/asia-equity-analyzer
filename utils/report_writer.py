@@ -16,7 +16,29 @@ def sanitize_filename(name: str) -> str:
     name = re.sub(r"[^a-zA-Z0-9]+", "_", name)
     # Collapse multiple underscores and strip leading/trailing
     name = re.sub(r"_+", "_", name).strip("_")
-    return name.lower()
+    return name.lower() or "report"
+
+
+def _escape_table_cell(text: str) -> str:
+    """Escape pipe characters so they don't split a Markdown table row into extra cells."""
+    return text.replace("|", "\\|")
+
+
+def _safe_code_span(text: str) -> str:
+    """Wrap text in a CommonMark-safe inline code span.
+
+    Backslash escapes are not processed inside code spans, so a literal
+    backtick in `text` can't just be escaped — it would prematurely close
+    the span. Per the CommonMark spec, the fix is to use a longer run of
+    backticks as the delimiter than any backtick run inside the content,
+    padding with a space if the content starts or ends with a backtick.
+    """
+    if not text:
+        return "``"
+    runs = re.findall(r"`+", text)
+    fence = "`" * ((max(len(r) for r in runs) if runs else 0) + 1)
+    pad = " " if text[0] == "`" or text[-1] == "`" else ""
+    return f"{fence}{pad}{text}{pad}{fence}"
 
 
 def write_report(
@@ -71,11 +93,21 @@ def write_report(
     else:
         chars_detail = f"{original_chars:,}"
 
+    # Markdown-safe renderings: table cells need pipes escaped (or the row
+    # splits into extra columns) and both contexts need CommonMark-safe code
+    # spans (a raw backtick in the filename/model would otherwise prematurely
+    # close a naive `{...}` wrapper).
+    source_cell = _safe_code_span(_escape_table_cell(source_filename))
+    model_cell = _safe_code_span(_escape_table_cell(model))
+    source_span = _safe_code_span(source_filename)
+    model_span = _safe_code_span(model)
+    default_model_span = _safe_code_span(MODEL)
+
     pages_row = f"| Pages | {page_count:,} |\n" if page_count else ""
     cost_label = "Estimated API Cost" + (" ⚠️" if pricing_uncertain else "")
     cost_footnote = (
-        f"\n*⚠️ Cost estimate uses `{MODEL}` pricing constants but the response "
-        f"came from `{model}` — actual cost may differ.*\n"
+        f"\n*⚠️ Cost estimate uses {default_model_span} pricing constants but the response "
+        f"came from {model_span} — actual cost may differ.*\n"
         if pricing_uncertain
         else ""
     )
@@ -85,9 +117,9 @@ def write_report(
 
 | Parameter | Value |
 |-----------|-------|
-| Source File | `{source_filename}` |
+| Source File | {source_cell} |
 {pages_row}| Characters Sent | {chars_detail} |
-| Model | `{model}` |
+| Model | {model_cell} |
 | Input Tokens | {input_tokens:,} |
 | Output Tokens | {output_tokens:,} |
 | Total Tokens | {total_tokens:,} |
@@ -118,7 +150,7 @@ pricing_uncertain: {str(pricing_uncertain).lower()}
 
     banner = (
         f"> **Asia Equity Analyzer** — Generated {date_display}\n"
-        f"> Source: `{source_filename}` | Model: `{model}` | "
+        f"> Source: {source_span} | Model: {model_span} | "
         f"Tokens: {total_tokens:,} | Cost: ${estimated_cost:.4f}\n\n---\n\n"
     )
 
