@@ -1,5 +1,6 @@
 """Report writer: saves analysis output as a timestamped markdown file."""
 
+import json
 import os
 import re
 from datetime import datetime
@@ -29,6 +30,7 @@ def write_report(
     original_chars: int = 0,
     was_truncated: bool = False,
     model: str = MODEL,
+    pricing_uncertain: bool = False,
 ) -> str:
     """Write the analysis to a timestamped markdown file in the output directory.
 
@@ -43,6 +45,9 @@ def write_report(
         original_chars: Total characters before truncation.
         was_truncated: Whether the document was truncated before sending.
         model: The model ID that produced the response.
+        pricing_uncertain: True if `model` differs from the model the cost
+            constants in config.py are calibrated for, meaning the cost
+            estimate may not reflect actual billed cost.
 
     Returns:
         Path to the written report file.
@@ -67,6 +72,13 @@ def write_report(
         chars_detail = f"{original_chars:,}"
 
     pages_row = f"| Pages | {page_count:,} |\n" if page_count else ""
+    cost_label = "Estimated API Cost" + (" ⚠️" if pricing_uncertain else "")
+    cost_footnote = (
+        f"\n*⚠️ Cost estimate uses `{MODEL}` pricing constants but the response "
+        f"came from `{model}` — actual cost may differ.*\n"
+        if pricing_uncertain
+        else ""
+    )
 
     stats_table = f"""\
 ## Processing Statistics
@@ -79,18 +91,18 @@ def write_report(
 | Input Tokens | {input_tokens:,} |
 | Output Tokens | {output_tokens:,} |
 | Total Tokens | {total_tokens:,} |
-| Estimated API Cost | ${estimated_cost:.4f} |
+| {cost_label} | ${estimated_cost:.4f} |
 | Analysis Time | {elapsed_seconds:.1f}s |
-
+{cost_footnote}
 ---
 
 """
 
     yaml_header = f"""\
 ---
-source_file: {source_filename}
+source_file: {json.dumps(source_filename, ensure_ascii=False)}
 analysis_date: {date_display}
-model: {model}
+model: {json.dumps(model, ensure_ascii=False)}
 input_tokens: {input_tokens}
 output_tokens: {output_tokens}
 total_tokens: {total_tokens}
@@ -99,6 +111,7 @@ original_chars: {original_chars}
 was_truncated: {str(was_truncated).lower()}
 elapsed_seconds: {elapsed_seconds:.1f}
 estimated_cost_usd: {estimated_cost:.4f}
+pricing_uncertain: {str(pricing_uncertain).lower()}
 ---
 
 """

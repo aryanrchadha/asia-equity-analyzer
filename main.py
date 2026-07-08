@@ -96,6 +96,13 @@ def main():
 
     # Step 3: Write report
     cost = estimate_cost(analysis.input_tokens, analysis.output_tokens)
+    pricing_uncertain = analysis.model != MODEL
+    if pricing_uncertain:
+        print(
+            f"⚠️  Cost estimate uses {MODEL} pricing (${INPUT_TOKEN_COST_PER_MILLION}/M in, "
+            f"${OUTPUT_TOKEN_COST_PER_MILLION}/M out) but the response came from {analysis.model}. "
+            "The estimate below may not reflect actual billed cost."
+        )
     output_path = write_report(
         analysis_text=analysis.text,
         source_filename=doc_info.filename,
@@ -107,6 +114,7 @@ def main():
         original_chars=doc_info.original_chars,
         was_truncated=doc_info.was_truncated,
         model=analysis.model,
+        pricing_uncertain=pricing_uncertain,
     )
 
     # Step 4: Summary
