@@ -1,5 +1,7 @@
 """Report writer: saves analysis output as a timestamped markdown file."""
 
+from __future__ import annotations
+
 import json
 import os
 import re
@@ -53,6 +55,9 @@ def write_report(
     was_truncated: bool = False,
     model: str = MODEL,
     pricing_uncertain: bool = False,
+    cache_creation_tokens: int = 0,
+    cache_read_tokens: int = 0,
+    agent_stats: list | None = None,
 ) -> str:
     """Write the analysis to a timestamped markdown file in the output directory.
 
@@ -70,6 +75,10 @@ def write_report(
         pricing_uncertain: True if `model` differs from the model the cost
             constants in config.py are calibrated for, meaning the cost
             estimate may not reflect actual billed cost.
+        cache_creation_tokens: Prompt-cache write tokens (multi-agent mode).
+        cache_read_tokens: Prompt-cache read tokens (multi-agent mode).
+        agent_stats: Optional per-agent usage dicts (title, input_tokens,
+            output_tokens, elapsed_seconds) for the multi-agent pipeline.
 
     Returns:
         Path to the written report file.
@@ -84,7 +93,7 @@ def write_report(
     output_filename = f"{company_name}_{timestamp_str}.md"
     output_path = os.path.join(OUTPUT_DIR, output_filename)
 
-    total_tokens = input_tokens + output_tokens
+    total_tokens = input_tokens + cache_creation_tokens + cache_read_tokens + output_tokens
 
     # Build character / page detail line
     chars_sent = min(original_chars, MAX_DOCUMENT_CHARS) if was_truncated else original_chars
@@ -104,6 +113,12 @@ def write_report(
     default_model_span = _safe_code_span(MODEL)
 
     pages_row = f"| Pages | {page_count:,} |\n" if page_count else ""
+    cache_rows = ""
+    if cache_creation_tokens or cache_read_tokens:
+        cache_rows = (
+            f"| Cache Write Tokens | {cache_creation_tokens:,} |\n"
+            f"| Cache Read Tokens | {cache_read_tokens:,} |\n"
+        )
     cost_label = "Estimated API Cost" + (" ⚠️" if pricing_uncertain else "")
     cost_footnote = (
         f"\n*⚠️ Cost estimate uses {default_model_span} pricing constants but the response "
@@ -121,11 +136,27 @@ def write_report(
 {pages_row}| Characters Sent | {chars_detail} |
 | Model | {model_cell} |
 | Input Tokens | {input_tokens:,} |
-| Output Tokens | {output_tokens:,} |
+{cache_rows}| Output Tokens | {output_tokens:,} |
 | Total Tokens | {total_tokens:,} |
 | {cost_label} | ${estimated_cost:.4f} |
 | Analysis Time | {elapsed_seconds:.1f}s |
 {cost_footnote}
+---
+
+"""
+
+    if agent_stats:
+        agent_rows = "".join(
+            f"| {_escape_table_cell(a['title'])} | {a['input_tokens']:,} "
+            f"| {a['output_tokens']:,} | {a['elapsed_seconds']:.1f}s |\n"
+            for a in agent_stats
+        )
+        stats_table += f"""\
+## Agent Breakdown
+
+| Agent | Input Tokens | Output Tokens | Time |
+|-------|--------------|---------------|------|
+{agent_rows}
 ---
 
 """
@@ -136,8 +167,11 @@ source_file: {json.dumps(source_filename, ensure_ascii=False)}
 analysis_date: {date_display}
 model: {json.dumps(model, ensure_ascii=False)}
 input_tokens: {input_tokens}
+cache_creation_tokens: {cache_creation_tokens}
+cache_read_tokens: {cache_read_tokens}
 output_tokens: {output_tokens}
 total_tokens: {total_tokens}
+agent_count: {len(agent_stats) if agent_stats else 1}
 page_count: {page_count}
 original_chars: {original_chars}
 was_truncated: {str(was_truncated).lower()}
