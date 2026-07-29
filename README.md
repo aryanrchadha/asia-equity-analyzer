@@ -71,6 +71,20 @@ To use the original single-agent mode instead:
 python main.py --single
 ```
 
+### Cross-Period Comparison
+
+To track how a company's scores evolve across filings, pass two or more reports of the same company in chronological order (earliest first):
+
+```bash
+python main.py --compare input/tencent_fy2022.pdf input/tencent_fy2023.pdf input/tencent_fy2024.pdf
+```
+
+Each filing gets its own full multi-agent report, then a comparison agent produces `output/comparison_<company>_<timestamp>.md` containing:
+
+- A **score trajectory table** — every scored dimension per period plus a first-to-last delta, built deterministically from the `SCORE: X/N` lines in each report (no model re-scoring)
+- **Thesis evolution** — which tensions resolved, worsened, or persist across every period
+- A **trajectory bottom line** — improving/stable/deteriorating call and what the next filing must show
+
 ### Example Console Output
 
 ```
@@ -140,13 +154,16 @@ asia-equity-analyzer/
 ├── config.py                # Model settings, dirs, cost constants
 ├── agents/
 │   ├── analyst.py           # Single-agent mode (one Claude API call)
-│   └── orchestrator.py      # Multi-agent mode: 6 parallel specialists + synthesis
+│   ├── orchestrator.py      # Multi-agent mode: 6 parallel specialists + synthesis
+│   └── comparator.py        # Cross-period comparison: score deltas + trajectory agent
 ├── prompts/
 │   ├── financial_analysis.py  # Single-agent system prompt
-│   └── section_prompts.py     # Specialist + synthesis prompts (multi-agent)
+│   ├── section_prompts.py     # Specialist + synthesis prompts (multi-agent)
+│   └── comparison.py          # Cross-period trajectory prompt
 ├── utils/
 │   ├── document_loader.py   # PDF/text extraction
-│   └── report_writer.py     # Markdown report output
+│   ├── report_writer.py     # Markdown report output
+│   └── score_parser.py      # Extract SCORE/RATING lines from finished reports
 ├── input/                   # Drop files here
 ├── output/                  # Reports appear here
 ├── .env                     # API key (gitignored)
@@ -170,7 +187,7 @@ Using Claude Sonnet 4 pricing ($3/M input, $15/M output):
 - Documents over 180,000 characters are truncated (later sections may be cut)
 - Analysis quality depends on the quality of the source document
 - Financial figures are extracted as-is — no independent verification
-- The tool analyzes one filing at a time; cross-period comparisons are limited to what's in the single report
+- Cross-period comparison (`--compare`) assumes the filings are for the same company and given in chronological order — it does not verify either
 
 ## Multi-Agent Architecture
 
@@ -197,7 +214,8 @@ Each report includes an **Agent Breakdown** table with per-agent token usage and
 ## Roadmap
 
 - ✅ **Week 2** — six parallel financial analysis agents with specialized prompts, prompt caching, and a synthesis pass
-- 🗓️ **Week 3** — cross-period comparison: analyze multiple filings of the same company and track score deltas over time
+- ✅ **Week 3** — cross-period comparison (`--compare`): per-filing multi-agent reports, a deterministic score-delta table, and a trajectory analysis agent
+- 🗓️ **Week 4** — peer comparison: analyze multiple companies in the same sector and rank them on the composite scorecard
 
 ## License
 

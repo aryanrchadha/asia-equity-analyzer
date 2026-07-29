@@ -7,12 +7,14 @@ runs it through a Claude-powered financial analyst agent, and
 writes a structured investment analysis to output/.
 
 By default the analysis runs as six parallel section-specialist agents plus a
-synthesis agent. Use --single for the original single-agent mode.
+synthesis agent. Use --single for the original single-agent mode, or --compare
+to analyze multiple filings of the same company and track score deltas.
 
 Usage:
     python main.py
     python main.py --file path/to/report.pdf
     python main.py --single --model claude-opus-4-8 --max-tokens 12000
+    python main.py --compare fy2022.pdf fy2023.pdf fy2024.pdf
 """
 
 import argparse
@@ -29,8 +31,9 @@ from config import (
     TEMPERATURE,
 )
 from utils.document_loader import load_document
-from utils.report_writer import write_report
+from utils.report_writer import write_comparison_report, write_report
 from agents.analyst import analyze_document
+from agents.comparator import analyze_trajectory, build_score_table, make_filing_analysis
 from agents.orchestrator import analyze_document_multi
 
 
@@ -63,7 +66,23 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Use the original single-agent analysis instead of the six-agent pipeline.",
     )
-    return parser.parse_args()
+    parser.add_argument(
+        "--compare",
+        nargs="+",
+        metavar="PATH",
+        default=None,
+        help="Analyze two or more filings of the same company (in chronological "
+        "order, earliest first) and produce a cross-period comparison report.",
+    )
+    args = parser.parse_args()
+    if args.compare is not None:
+        if len(args.compare) < 2:
+            parser.error("--compare requires at least two filings.")
+        if args.single:
+            parser.error("--compare uses the multi-agent pipeline; drop --single.")
+        if args.file:
+            parser.error("--compare takes its file list directly; drop --file.")
+    return args
 
 
 def estimate_cost(
@@ -81,8 +100,119 @@ def estimate_cost(
     )
 
 
+def run_comparison(args) -> None:
+    """Analyze each filing with the multi-agent pipeline, then compare periods."""
+    print()
+    print("=" * 60)
+    print("  📊 Asia Equity Analyzer — Cross-Period Comparison")
+    print(f"  {len(args.compare)} filings, chronological order as given")
+    print("=" * 60)
+    print()
+    print(f"  Model:      {args.model}")
+    print(f"  Mode:       6 specialists + synthesis, per filing")
+    print()
+
+    start_time = time.time()
+    filings = []
+    for index, path in enumerate(args.compare, start=1):
+        print(f"📂 Filing {index}/{len(args.compare)}")
+        doc_info = load_document(filepath=path)
+        if doc_info is None:
+            sys.exit(1)
+
+        filing_start = time.time()
+        analysis = analyze_document_multi(doc_info.text, model=args.model)
+        filing_elapsed = time.time() - filing_start
+
+        cost = estimate_cost(
+            analysis.input_tokens,
+            analysis.output_tokens,
+            analysis.cache_creation_tokens,
+            analysis.cache_read_tokens,
+        )
+        report_path = write_report(
+            analysis_text=analysis.text,
+            source_filename=doc_info.filename,
+            input_tokens=analysis.input_tokens,
+            output_tokens=analysis.output_tokens,
+            elapsed_seconds=filing_elapsed,
+            estimated_cost=cost,
+            page_count=doc_info.page_count,
+            original_chars=doc_info.original_chars,
+            was_truncated=doc_info.was_truncated,
+            model=analysis.model,
+            pricing_uncertain=analysis.model != MODEL,
+            cache_creation_tokens=analysis.cache_creation_tokens,
+            cache_read_tokens=analysis.cache_read_tokens,
+            agent_stats=[
+                {
+                    "title": s.title,
+                    "input_tokens": s.input_tokens + s.cache_creation_tokens + s.cache_read_tokens,
+                    "output_tokens": s.output_tokens,
+                    "elapsed_seconds": s.elapsed_seconds,
+                }
+                for s in analysis.sections
+            ],
+        )
+        filings.append(make_filing_analysis(doc_info.filename, analysis, report_path))
+        print()
+
+    trajectory = analyze_trajectory(filings, model=args.model)
+    elapsed = time.time() - start_time
+
+    input_tokens = sum(f.analysis.input_tokens for f in filings) + trajectory.input_tokens
+    output_tokens = sum(f.analysis.output_tokens for f in filings) + trajectory.output_tokens
+    cache_creation = (
+        sum(f.analysis.cache_creation_tokens for f in filings)
+        + trajectory.cache_creation_tokens
+    )
+    cache_read = (
+        sum(f.analysis.cache_read_tokens for f in filings) + trajectory.cache_read_tokens
+    )
+    total_cost = estimate_cost(input_tokens, output_tokens, cache_creation, cache_read)
+    pricing_uncertain = trajectory.model != MODEL
+
+    if pricing_uncertain:
+        print(
+            f"⚠️  Cost estimate uses {MODEL} pricing but the responses came from "
+            f"{trajectory.model}. The estimate may not reflect actual billed cost."
+        )
+    output_path = write_comparison_report(
+        score_table=build_score_table(filings),
+        trajectory_text=trajectory.text,
+        filings=filings,
+        model=trajectory.model,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cache_creation_tokens=cache_creation,
+        cache_read_tokens=cache_read,
+        elapsed_seconds=elapsed,
+        estimated_cost=total_cost,
+        pricing_uncertain=pricing_uncertain,
+    )
+
+    print()
+    print("─" * 60)
+    print("  📋 COMPARISON SUMMARY")
+    print("─" * 60)
+    for f in filings:
+        print(f"  Period report:  {f.report_path}")
+    print(f"  Comparison:     {output_path}")
+    print(f"  Model:          {trajectory.model}")
+    total = input_tokens + cache_creation + cache_read + output_tokens
+    print(f"  Total tokens:   {total:,}")
+    print(f"  Est. cost:      ${total_cost:.4f}")
+    print(f"  Time elapsed:   {elapsed:.1f}s")
+    print("─" * 60)
+    print()
+
+
 def main():
     args = parse_args()
+
+    if args.compare:
+        run_comparison(args)
+        return
 
     print()
     print("=" * 60)

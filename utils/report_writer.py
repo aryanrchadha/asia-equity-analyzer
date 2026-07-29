@@ -195,3 +195,107 @@ pricing_uncertain: {str(pricing_uncertain).lower()}
 
     print(f"📝 Report written: {output_path}")
     return output_path
+
+
+def write_comparison_report(
+    score_table: str,
+    trajectory_text: str,
+    filings: list,
+    model: str,
+    input_tokens: int,
+    output_tokens: int,
+    cache_creation_tokens: int,
+    cache_read_tokens: int,
+    elapsed_seconds: float,
+    estimated_cost: float,
+    pricing_uncertain: bool = False,
+) -> str:
+    """Write the cross-period comparison report.
+
+    Args:
+        score_table: Rendered markdown score-trajectory table.
+        trajectory_text: The trend-analysis agent's output.
+        filings: FilingAnalysis objects in chronological order.
+        model: Model that produced the analyses.
+        input_tokens/output_tokens/cache_*: Aggregate usage across all filings
+            and the trajectory call.
+        elapsed_seconds: Total wall-clock time for the comparison run.
+        estimated_cost: Estimated USD cost for the whole run.
+        pricing_uncertain: True if `model` differs from the pricing baseline.
+
+    Returns:
+        Path to the written comparison report.
+    """
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+    timestamp = datetime.now()
+    timestamp_str = timestamp.strftime("%Y-%m-%d_%H%M%S")
+    date_display = timestamp.strftime("%Y-%m-%d %H:%M:%S")
+
+    company = sanitize_filename(filings[0].filename)
+    output_path = os.path.join(OUTPUT_DIR, f"comparison_{company}_{timestamp_str}.md")
+
+    total_tokens = input_tokens + cache_creation_tokens + cache_read_tokens + output_tokens
+    source_files = [f.filename for f in filings]
+
+    model_span = _safe_code_span(model)
+    default_model_span = _safe_code_span(MODEL)
+    cost_footnote = (
+        f"\n*⚠️ Cost estimate uses {default_model_span} pricing constants but the responses "
+        f"came from {model_span} — actual cost may differ.*\n"
+        if pricing_uncertain
+        else ""
+    )
+
+    filing_rows = "".join(
+        f"| {i + 1} | {_safe_code_span(_escape_table_cell(f.filename))} "
+        f"| {_safe_code_span(_escape_table_cell(f.report_path))} |\n"
+        for i, f in enumerate(filings)
+    )
+
+    yaml_header = f"""\
+---
+report_type: cross_period_comparison
+source_files: {json.dumps(source_files, ensure_ascii=False)}
+period_count: {len(filings)}
+analysis_date: {date_display}
+model: {json.dumps(model, ensure_ascii=False)}
+input_tokens: {input_tokens}
+cache_creation_tokens: {cache_creation_tokens}
+cache_read_tokens: {cache_read_tokens}
+output_tokens: {output_tokens}
+total_tokens: {total_tokens}
+elapsed_seconds: {elapsed_seconds:.1f}
+estimated_cost_usd: {estimated_cost:.4f}
+pricing_uncertain: {str(pricing_uncertain).lower()}
+---
+
+"""
+
+    body = f"""\
+> **Asia Equity Analyzer — Cross-Period Comparison** — Generated {date_display}
+> Periods: {len(filings)} | Model: {model_span} | Tokens: {total_tokens:,} | Cost: ${estimated_cost:.4f}
+
+---
+
+## Filings Compared (chronological)
+
+| # | Source File | Full Report |
+|---|-------------|-------------|
+{filing_rows}
+---
+
+## Score Trajectory
+
+{score_table}
+{cost_footnote}
+---
+
+{trajectory_text}
+"""
+
+    with open(output_path, "w", encoding="utf-8") as f:
+        f.write(yaml_header + body)
+
+    print(f"📝 Comparison report written: {output_path}")
+    return output_path
