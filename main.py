@@ -9,7 +9,8 @@ writes a structured investment analysis to output/.
 By default the analysis runs as six parallel section-specialist agents plus a
 synthesis agent. Use --single for the original single-agent mode, or --compare
 to analyze multiple filings of the same company and track score deltas, or
---peers to rank multiple companies in the same sector.
+--peers to rank multiple companies in the same sector. Add --watch to record
+scores to the persistent watchlist and get alerted on material moves.
 
 Usage:
     python main.py
@@ -17,6 +18,8 @@ Usage:
     python main.py --single --model claude-opus-4-8 --max-tokens 12000
     python main.py --compare fy2022.pdf fy2023.pdf fy2024.pdf
     python main.py --peers tencent.pdf alibaba.pdf netease.pdf
+    python main.py --file tencent_fy2024.pdf --watch tencent
+    python main.py --show-watchlist
 """
 
 import argparse
@@ -31,9 +34,24 @@ from config import (
     MODEL,
     OUTPUT_TOKEN_COST_PER_MILLION,
     TEMPERATURE,
+    WATCHLIST_ALERT_THRESHOLD,
+    WATCHLIST_PATH,
 )
 from utils.document_loader import load_document
-from utils.report_writer import write_comparison_report, write_peer_report, write_report
+from utils.report_writer import (
+    sanitize_filename,
+    write_comparison_report,
+    write_peer_report,
+    write_report,
+)
+from utils.score_parser import parse_scores
+from utils.watchlist import (
+    WatchlistError,
+    format_watchlist_table,
+    load_watchlist,
+    record_analysis,
+    save_watchlist,
+)
 from agents.analyst import analyze_document
 from agents.comparator import (
     analyze_peers,
@@ -91,6 +109,34 @@ def parse_args() -> argparse.Namespace:
         help="Analyze two or more companies in the same sector (one filing each) "
         "and produce a ranked peer-comparison report.",
     )
+    parser.add_argument(
+        "--watch",
+        nargs="?",
+        const="",
+        metavar="COMPANY",
+        default=None,
+        help="Record this run's scores to the watchlist and alert on material "
+        "moves. Pass a company name to keep filings with different filenames "
+        "under one entry; defaults to the filename.",
+    )
+    parser.add_argument(
+        "--show-watchlist",
+        action="store_true",
+        help="Print the watchlist and exit. Makes no API calls.",
+    )
+    parser.add_argument(
+        "--watchlist-path",
+        metavar="PATH",
+        default=WATCHLIST_PATH,
+        help="Path to the watchlist JSON store.",
+    )
+    parser.add_argument(
+        "--alert-threshold",
+        type=float,
+        metavar="POINTS",
+        default=WATCHLIST_ALERT_THRESHOLD,
+        help="Composite move (out of 5.0) that triggers a watchlist alert.",
+    )
     args = parser.parse_args()
     for flag, paths in (("--compare", args.compare), ("--peers", args.peers)):
         if paths is None:
@@ -103,6 +149,23 @@ def parse_args() -> argparse.Namespace:
             parser.error(f"{flag} takes its file list directly; drop --file.")
     if args.compare and args.peers:
         parser.error("--compare and --peers are mutually exclusive.")
+    if args.show_watchlist and (
+        args.compare or args.peers or args.file or args.single or args.watch is not None
+    ):
+        parser.error("--show-watchlist prints the watchlist and exits; run it on its own.")
+    if args.watch is not None:
+        if args.single:
+            parser.error(
+                "--watch needs the multi-agent pipeline: only its prompts emit the "
+                "explicit SCORE lines the watchlist records. Drop --single."
+            )
+        if args.watch and args.peers:
+            parser.error(
+                "--peers analyzes different companies; each is named from its "
+                "filename. Use --watch without a company name."
+            )
+    if args.alert_threshold < 0:
+        parser.error("--alert-threshold must be zero or positive.")
     return args
 
 
@@ -227,6 +290,69 @@ def _print_group_summary(
     print()
 
 
+def _record_watchlist(args, records: list) -> None:
+    """Append records to the watchlist and print any alerts.
+
+    `records` is a list of (company, source_file, report_path, model, scores).
+    Watchlist problems are reported but never abort the run — the analysis
+    reports are already written and the API spend is already incurred.
+    """
+    try:
+        data = load_watchlist(args.watchlist_path)
+    except WatchlistError as e:
+        print(f"⚠️  Watchlist not updated: {e}")
+        print("   Fix or move the file and re-run; the reports above are unaffected.")
+        return
+
+    alerts = []
+    for company, source_file, report_path, model, scores in records:
+        alerts.extend(
+            record_analysis(
+                data,
+                company=company,
+                source_file=source_file,
+                report_path=report_path,
+                model=model,
+                scores=scores,
+                threshold=args.alert_threshold,
+            )
+        )
+
+    try:
+        save_watchlist(data, args.watchlist_path)
+    except OSError as e:
+        print(f"⚠️  Could not write watchlist '{args.watchlist_path}': {e}")
+        return
+
+    names = ", ".join(company for company, *_ in records)
+    print(f"👁️  Watchlist updated ({args.watchlist_path}): {names}")
+    if alerts:
+        print()
+        print(f"🔔 Watchlist alerts (threshold ±{args.alert_threshold:g}):")
+        for alert in alerts:
+            marker = "⚠️ " if alert.adverse else "✅"
+            print(f"   {marker} {alert.company}: {alert.message}")
+    print()
+
+
+def run_show_watchlist(args) -> None:
+    """Print the watchlist table and exit without making any API calls."""
+    try:
+        data = load_watchlist(args.watchlist_path)
+    except WatchlistError as e:
+        print(f"❌ {e}")
+        sys.exit(1)
+
+    print()
+    print("=" * 60)
+    print("  👁️  Asia Equity Analyzer — Watchlist")
+    print(f"  {args.watchlist_path}")
+    print("=" * 60)
+    print()
+    print(format_watchlist_table(data, threshold=args.alert_threshold))
+    print()
+
+
 def _warn_pricing(final_call) -> bool:
     pricing_uncertain = final_call.model != MODEL
     if pricing_uncertain:
@@ -275,6 +401,17 @@ def run_comparison(args) -> None:
         "COMPARISON SUMMARY", "Period report:", filings, output_path,
         trajectory.model, usage, total_cost, elapsed,
     )
+    if args.watch is not None:
+        # Every filing is the same company, so they share one watchlist entry
+        # and are recorded in the chronological order they were given.
+        company = args.watch or sanitize_filename(filings[0].filename)
+        _record_watchlist(
+            args,
+            [
+                (company, f.filename, f.report_path, f.analysis.model, f.scores)
+                for f in filings
+            ],
+        )
 
 
 def run_peers(args) -> None:
@@ -316,11 +453,24 @@ def run_peers(args) -> None:
         "PEER SUMMARY", "Company report:", ranked, output_path,
         peer_analysis.model, usage, total_cost, elapsed,
     )
+    if args.watch is not None:
+        # Each filing is a different company, so each gets its own entry named
+        # from its filename (--watch takes no name in peers mode).
+        _record_watchlist(
+            args,
+            [
+                (f.label, f.filename, f.report_path, f.analysis.model, f.scores)
+                for f in filings
+            ],
+        )
 
 
 def main():
     args = parse_args()
 
+    if args.show_watchlist:
+        run_show_watchlist(args)
+        return
     if args.compare:
         run_comparison(args)
         return
@@ -419,6 +569,20 @@ def main():
     print(f"  Time elapsed:   {elapsed:.1f}s")
     print("─" * 60)
     print()
+
+    # Step 5: Watchlist
+    if args.watch is not None:
+        company = args.watch or sanitize_filename(doc_info.filename)
+        _record_watchlist(
+            args,
+            [(
+                company,
+                doc_info.filename,
+                output_path,
+                analysis.model,
+                parse_scores(analysis.text),
+            )],
+        )
 
 
 if __name__ == "__main__":

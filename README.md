@@ -99,6 +99,29 @@ Each company gets its own full multi-agent report, then a peer agent produces `o
 - **Sector ranking rationale** — where the composite agrees with the qualitative read and where it misleads; near-ties (within 0.3) get an explicit tiebreak call
 - **Relative strengths and weaknesses** per company, and a **top pick / avoid** verdict with comparison caveats (fiscal period mismatches, reporting standards, disclosure gaps)
 
+### Watchlist
+
+Add `--watch` to any analysis run to record its scores to a persistent store and get alerted when a company moves materially:
+
+```bash
+python main.py --file input/tencent_fy2024.pdf --watch tencent
+python main.py --peers input/tencent.pdf input/alibaba.pdf --watch
+python main.py --show-watchlist
+```
+
+The company name is optional — pass one (`--watch tencent`) to keep filings whose filenames differ under a single entry, or omit it to name the entry after the file. Scores land in `watchlist.json` (a plain, diffable JSON file you can commit alongside your reports), and each run is compared against that company's previous entry:
+
+- **Composite moves** of at least `--alert-threshold` points (default 0.5 out of 5.0) are flagged, with direction
+- **Governance rating changes** are always flagged — a slide into `CONCERNING` or `RED FLAG` is material regardless of the composite
+
+```
+🔔 Watchlist alerts (threshold ±0.5):
+   ⚠️  tencent: composite deteriorated 4.1 → 3.4 (-0.7, threshold ±0.5)
+   ✅ alibaba: governance rating CONCERNING → ADEQUATE
+```
+
+`--show-watchlist` prints the current table (companies, filing count, latest and previous composite, delta, governance, last updated) and makes no API calls. Watchlist recording requires the multi-agent pipeline, since only its prompts emit the explicit `SCORE` lines the store reads.
+
 ### Example Console Output
 
 ```
@@ -177,7 +200,9 @@ asia-equity-analyzer/
 ├── utils/
 │   ├── document_loader.py   # PDF/text extraction
 │   ├── report_writer.py     # Markdown report output
-│   └── score_parser.py      # Extract SCORE/RATING lines from finished reports
+│   ├── score_parser.py      # Extract SCORE/RATING lines from finished reports
+│   └── watchlist.py         # Persistent score history + move alerts
+├── watchlist.json           # Score history (created on first --watch run)
 ├── input/                   # Drop files here
 ├── output/                  # Reports appear here
 ├── .env                     # API key (gitignored)
@@ -230,7 +255,8 @@ Each report includes an **Agent Breakdown** table with per-agent token usage and
 - ✅ **Week 2** — six parallel financial analysis agents with specialized prompts, prompt caching, and a synthesis pass
 - ✅ **Week 3** — cross-period comparison (`--compare`): per-filing multi-agent reports, a deterministic score-delta table, and a trajectory analysis agent
 - ✅ **Week 4** — peer comparison (`--peers`): rank companies in the same sector on the composite scorecard with a top pick / avoid verdict
-- 🗓️ **Week 5** — watchlist mode: persist scores across runs and alert when a company's composite moves by more than a threshold
+- ✅ **Week 5** — watchlist (`--watch` / `--show-watchlist`): persistent score history with composite-move and governance-change alerts
+- 🗓️ **Week 6** — batch mode: analyze a whole directory of filings in one run, with a sector-level summary
 
 ## License
 

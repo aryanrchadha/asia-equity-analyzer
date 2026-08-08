@@ -32,3 +32,7 @@ CACHE_READ_COST_PER_MILLION = 0.30    # 0.1x input price
 
 # Document Processing
 MAX_DOCUMENT_CHARS = 180_000
+
+# Watchlist (persistent score history across runs)
+WATCHLIST_PATH = "watchlist.json"
+WATCHLIST_ALERT_THRESHOLD = 0.5   # composite move (out of 5.0) that triggers an alert
