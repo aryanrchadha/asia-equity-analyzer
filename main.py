@@ -8,13 +8,15 @@ writes a structured investment analysis to output/.
 
 By default the analysis runs as six parallel section-specialist agents plus a
 synthesis agent. Use --single for the original single-agent mode, or --compare
-to analyze multiple filings of the same company and track score deltas.
+to analyze multiple filings of the same company and track score deltas, or
+--peers to rank multiple companies in the same sector.
 
 Usage:
     python main.py
     python main.py --file path/to/report.pdf
     python main.py --single --model claude-opus-4-8 --max-tokens 12000
     python main.py --compare fy2022.pdf fy2023.pdf fy2024.pdf
+    python main.py --peers tencent.pdf alibaba.pdf netease.pdf
 """
 
 import argparse
@@ -31,9 +33,16 @@ from config import (
     TEMPERATURE,
 )
 from utils.document_loader import load_document
-from utils.report_writer import write_comparison_report, write_report
+from utils.report_writer import write_comparison_report, write_peer_report, write_report
 from agents.analyst import analyze_document
-from agents.comparator import analyze_trajectory, build_score_table, make_filing_analysis
+from agents.comparator import (
+    analyze_peers,
+    analyze_trajectory,
+    build_ranking_table,
+    build_score_table,
+    make_filing_analysis,
+    rank_peers,
+)
 from agents.orchestrator import analyze_document_multi
 
 
@@ -74,14 +83,26 @@ def parse_args() -> argparse.Namespace:
         help="Analyze two or more filings of the same company (in chronological "
         "order, earliest first) and produce a cross-period comparison report.",
     )
+    parser.add_argument(
+        "--peers",
+        nargs="+",
+        metavar="PATH",
+        default=None,
+        help="Analyze two or more companies in the same sector (one filing each) "
+        "and produce a ranked peer-comparison report.",
+    )
     args = parser.parse_args()
-    if args.compare is not None:
-        if len(args.compare) < 2:
-            parser.error("--compare requires at least two filings.")
+    for flag, paths in (("--compare", args.compare), ("--peers", args.peers)):
+        if paths is None:
+            continue
+        if len(paths) < 2:
+            parser.error(f"{flag} requires at least two filings.")
         if args.single:
-            parser.error("--compare uses the multi-agent pipeline; drop --single.")
+            parser.error(f"{flag} uses the multi-agent pipeline; drop --single.")
         if args.file:
-            parser.error("--compare takes its file list directly; drop --file.")
+            parser.error(f"{flag} takes its file list directly; drop --file.")
+    if args.compare and args.peers:
+        parser.error("--compare and --peers are mutually exclusive.")
     return args
 
 
@@ -100,28 +121,17 @@ def estimate_cost(
     )
 
 
-def run_comparison(args) -> None:
-    """Analyze each filing with the multi-agent pipeline, then compare periods."""
-    print()
-    print("=" * 60)
-    print("  📊 Asia Equity Analyzer — Cross-Period Comparison")
-    print(f"  {len(args.compare)} filings, chronological order as given")
-    print("=" * 60)
-    print()
-    print(f"  Model:      {args.model}")
-    print(f"  Mode:       6 specialists + synthesis, per filing")
-    print()
-
-    start_time = time.time()
+def _analyze_filings(paths: list, model: str) -> list:
+    """Run the multi-agent pipeline on each filing and write its report."""
     filings = []
-    for index, path in enumerate(args.compare, start=1):
-        print(f"📂 Filing {index}/{len(args.compare)}")
+    for index, path in enumerate(paths, start=1):
+        print(f"📂 Filing {index}/{len(paths)}")
         doc_info = load_document(filepath=path)
         if doc_info is None:
             sys.exit(1)
 
         filing_start = time.time()
-        analysis = analyze_document_multi(doc_info.text, model=args.model)
+        analysis = analyze_document_multi(doc_info.text, model=model)
         filing_elapsed = time.time() - filing_start
 
         cost = estimate_cost(
@@ -156,49 +166,42 @@ def run_comparison(args) -> None:
         )
         filings.append(make_filing_analysis(doc_info.filename, analysis, report_path))
         print()
+    return filings
 
-    trajectory = analyze_trajectory(filings, model=args.model)
-    elapsed = time.time() - start_time
 
-    input_tokens = sum(f.analysis.input_tokens for f in filings) + trajectory.input_tokens
-    output_tokens = sum(f.analysis.output_tokens for f in filings) + trajectory.output_tokens
+def _aggregate_usage(filings: list, final_call) -> tuple:
+    """Sum token usage across all filings plus the final comparison call."""
+    input_tokens = sum(f.analysis.input_tokens for f in filings) + final_call.input_tokens
+    output_tokens = sum(f.analysis.output_tokens for f in filings) + final_call.output_tokens
     cache_creation = (
         sum(f.analysis.cache_creation_tokens for f in filings)
-        + trajectory.cache_creation_tokens
+        + final_call.cache_creation_tokens
     )
     cache_read = (
-        sum(f.analysis.cache_read_tokens for f in filings) + trajectory.cache_read_tokens
+        sum(f.analysis.cache_read_tokens for f in filings) + final_call.cache_read_tokens
     )
-    total_cost = estimate_cost(input_tokens, output_tokens, cache_creation, cache_read)
-    pricing_uncertain = trajectory.model != MODEL
+    return input_tokens, output_tokens, cache_creation, cache_read
 
-    if pricing_uncertain:
-        print(
-            f"⚠️  Cost estimate uses {MODEL} pricing but the responses came from "
-            f"{trajectory.model}. The estimate may not reflect actual billed cost."
-        )
-    output_path = write_comparison_report(
-        score_table=build_score_table(filings),
-        trajectory_text=trajectory.text,
-        filings=filings,
-        model=trajectory.model,
-        input_tokens=input_tokens,
-        output_tokens=output_tokens,
-        cache_creation_tokens=cache_creation,
-        cache_read_tokens=cache_read,
-        elapsed_seconds=elapsed,
-        estimated_cost=total_cost,
-        pricing_uncertain=pricing_uncertain,
-    )
 
+def _print_group_summary(
+    heading: str,
+    row_label: str,
+    filings: list,
+    output_path: str,
+    model: str,
+    usage: tuple,
+    total_cost: float,
+    elapsed: float,
+) -> None:
+    input_tokens, output_tokens, cache_creation, cache_read = usage
     print()
     print("─" * 60)
-    print("  📋 COMPARISON SUMMARY")
+    print(f"  📋 {heading}")
     print("─" * 60)
     for f in filings:
-        print(f"  Period report:  {f.report_path}")
-    print(f"  Comparison:     {output_path}")
-    print(f"  Model:          {trajectory.model}")
+        print(f"  {row_label}  {f.report_path}")
+    print(f"  Combined:       {output_path}")
+    print(f"  Model:          {model}")
     total = input_tokens + cache_creation + cache_read + output_tokens
     print(f"  Total tokens:   {total:,}")
     print(f"  Est. cost:      ${total_cost:.4f}")
@@ -207,11 +210,105 @@ def run_comparison(args) -> None:
     print()
 
 
+def _warn_pricing(final_call) -> bool:
+    pricing_uncertain = final_call.model != MODEL
+    if pricing_uncertain:
+        print(
+            f"⚠️  Cost estimate uses {MODEL} pricing but the responses came from "
+            f"{final_call.model}. The estimate may not reflect actual billed cost."
+        )
+    return pricing_uncertain
+
+
+def run_comparison(args) -> None:
+    """Analyze each filing with the multi-agent pipeline, then compare periods."""
+    print()
+    print("=" * 60)
+    print("  📊 Asia Equity Analyzer — Cross-Period Comparison")
+    print(f"  {len(args.compare)} filings, chronological order as given")
+    print("=" * 60)
+    print()
+    print(f"  Model:      {args.model}")
+    print("  Mode:       6 specialists + synthesis, per filing")
+    print()
+
+    start_time = time.time()
+    filings = _analyze_filings(args.compare, args.model)
+    trajectory = analyze_trajectory(filings, model=args.model)
+    elapsed = time.time() - start_time
+
+    usage = _aggregate_usage(filings, trajectory)
+    total_cost = estimate_cost(*usage)
+    pricing_uncertain = _warn_pricing(trajectory)
+
+    output_path = write_comparison_report(
+        score_table=build_score_table(filings),
+        trajectory_text=trajectory.text,
+        filings=filings,
+        model=trajectory.model,
+        input_tokens=usage[0],
+        output_tokens=usage[1],
+        cache_creation_tokens=usage[2],
+        cache_read_tokens=usage[3],
+        elapsed_seconds=elapsed,
+        estimated_cost=total_cost,
+        pricing_uncertain=pricing_uncertain,
+    )
+    _print_group_summary(
+        "COMPARISON SUMMARY", "Period report:", filings, output_path,
+        trajectory.model, usage, total_cost, elapsed,
+    )
+
+
+def run_peers(args) -> None:
+    """Analyze each company with the multi-agent pipeline, then rank the group."""
+    print()
+    print("=" * 60)
+    print("  📊 Asia Equity Analyzer — Peer Comparison")
+    print(f"  {len(args.peers)} companies, ranked by composite score")
+    print("=" * 60)
+    print()
+    print(f"  Model:      {args.model}")
+    print("  Mode:       6 specialists + synthesis, per company")
+    print()
+
+    start_time = time.time()
+    filings = _analyze_filings(args.peers, args.model)
+    ranked = rank_peers(filings)
+    peer_analysis = analyze_peers(ranked, model=args.model)
+    elapsed = time.time() - start_time
+
+    usage = _aggregate_usage(filings, peer_analysis)
+    total_cost = estimate_cost(*usage)
+    pricing_uncertain = _warn_pricing(peer_analysis)
+
+    output_path = write_peer_report(
+        ranking_table=build_ranking_table(ranked),
+        peer_text=peer_analysis.text,
+        filings=ranked,
+        model=peer_analysis.model,
+        input_tokens=usage[0],
+        output_tokens=usage[1],
+        cache_creation_tokens=usage[2],
+        cache_read_tokens=usage[3],
+        elapsed_seconds=elapsed,
+        estimated_cost=total_cost,
+        pricing_uncertain=pricing_uncertain,
+    )
+    _print_group_summary(
+        "PEER SUMMARY", "Company report:", ranked, output_path,
+        peer_analysis.model, usage, total_cost, elapsed,
+    )
+
+
 def main():
     args = parse_args()
 
     if args.compare:
         run_comparison(args)
+        return
+    if args.peers:
+        run_peers(args)
         return
 
     print()

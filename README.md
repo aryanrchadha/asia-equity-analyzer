@@ -85,6 +85,20 @@ Each filing gets its own full multi-agent report, then a comparison agent produc
 - **Thesis evolution** — which tensions resolved, worsened, or persist across every period
 - A **trajectory bottom line** — improving/stable/deteriorating call and what the next filing must show
 
+### Peer Comparison
+
+To rank companies in the same sector against each other, pass one filing per company:
+
+```bash
+python main.py --peers input/tencent_fy2024.pdf input/alibaba_fy2024.pdf input/netease_fy2024.pdf
+```
+
+Each company gets its own full multi-agent report, then a peer agent produces `output/peers_<company>_<timestamp>.md` containing:
+
+- A **peer ranking table** — every scored dimension per company, sorted by composite score (companies with unparseable composites rank last)
+- **Sector ranking rationale** — where the composite agrees with the qualitative read and where it misleads; near-ties (within 0.3) get an explicit tiebreak call
+- **Relative strengths and weaknesses** per company, and a **top pick / avoid** verdict with comparison caveats (fiscal period mismatches, reporting standards, disclosure gaps)
+
 ### Example Console Output
 
 ```
@@ -215,7 +229,8 @@ Each report includes an **Agent Breakdown** table with per-agent token usage and
 
 - ✅ **Week 2** — six parallel financial analysis agents with specialized prompts, prompt caching, and a synthesis pass
 - ✅ **Week 3** — cross-period comparison (`--compare`): per-filing multi-agent reports, a deterministic score-delta table, and a trajectory analysis agent
-- 🗓️ **Week 4** — peer comparison: analyze multiple companies in the same sector and rank them on the composite scorecard
+- ✅ **Week 4** — peer comparison (`--peers`): rank companies in the same sector on the composite scorecard with a top pick / avoid verdict
+- 🗓️ **Week 5** — watchlist mode: persist scores across runs and alert when a company's composite moves by more than a threshold
 
 ## License
 

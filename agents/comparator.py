@@ -15,6 +15,7 @@ import anthropic
 from config import ANTHROPIC_API_KEY, MODEL, REQUEST_TIMEOUT, SYNTHESIS_MAX_TOKENS
 from agents.orchestrator import MultiAnalysisResult, SectionResult, _call
 from prompts.comparison import COMPARISON_INSTRUCTIONS
+from prompts.peer_comparison import PEER_COMPARISON_INSTRUCTIONS
 from prompts.section_prompts import BASE_ANALYST_CONTEXT
 from utils.score_parser import (
     GOVERNANCE_TO_NUMERIC,
@@ -85,10 +86,10 @@ def _period_context(filing: FilingAnalysis) -> str:
     return f"### PERIOD: {filing.label}\n\n{body}"
 
 
-def analyze_trajectory(
-    filings: list[FilingAnalysis], model: str = MODEL
+def _run_comparison_agent(
+    user_content: str, model: str, key: str, title: str, start_message: str
 ) -> SectionResult:
-    """Run the trend-analysis agent over the per-period analyses.
+    """Shared plumbing for the single-call comparison agents.
 
     Raises:
         SystemExit: If the API key is missing or the API call fails.
@@ -99,15 +100,7 @@ def analyze_trajectory(
 
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY, timeout=REQUEST_TIMEOUT)
 
-    user_content = (
-        COMPARISON_INSTRUCTIONS
-        + "SCORE TRAJECTORY TABLE:\n\n"
-        + build_score_table(filings)
-        + "\n\nPER-PERIOD ANALYSES (chronological, earliest first):\n\n"
-        + "\n\n".join(_period_context(f) for f in filings)
-    )
-
-    print("📈 Analyzing cross-period trajectory...")
+    print(start_message)
     try:
         result = _call(
             client,
@@ -115,8 +108,8 @@ def analyze_trajectory(
             user_content,
             model,
             SYNTHESIS_MAX_TOKENS,
-            "trajectory",
-            "Cross-Period Trajectory",
+            key,
+            title,
         )
     except anthropic.APIConnectionError as e:
         print(f"❌ API connection error: {e}")
@@ -131,10 +124,90 @@ def analyze_trajectory(
     print(f"   ✅ {result.title} ({result.elapsed_seconds:.1f}s)")
     if result.truncated:
         print(
-            f"   ⚠️  Trajectory analysis was cut off at the {SYNTHESIS_MAX_TOKENS:,}-token "
+            f"   ⚠️  {result.title} was cut off at the {SYNTHESIS_MAX_TOKENS:,}-token "
             "limit. Consider raising SYNTHESIS_MAX_TOKENS in config.py."
         )
     return result
+
+
+def analyze_trajectory(
+    filings: list[FilingAnalysis], model: str = MODEL
+) -> SectionResult:
+    """Run the trend-analysis agent over the per-period analyses."""
+    user_content = (
+        COMPARISON_INSTRUCTIONS
+        + "SCORE TRAJECTORY TABLE:\n\n"
+        + build_score_table(filings)
+        + "\n\nPER-PERIOD ANALYSES (chronological, earliest first):\n\n"
+        + "\n\n".join(_period_context(f) for f in filings)
+    )
+    return _run_comparison_agent(
+        user_content,
+        model,
+        "trajectory",
+        "Cross-Period Trajectory",
+        "📈 Analyzing cross-period trajectory...",
+    )
+
+
+def _composite_sort_key(filing: FilingAnalysis) -> tuple[int, float]:
+    """Sort by composite descending, companies without a composite last."""
+    composite = filing.scores.composite
+    return (0, -composite) if composite is not None else (1, 0.0)
+
+
+def rank_peers(filings: list[FilingAnalysis]) -> list[FilingAnalysis]:
+    """Order companies by composite score, best first (n/a composites last)."""
+    return sorted(filings, key=_composite_sort_key)
+
+
+def build_ranking_table(ranked: list[FilingAnalysis]) -> str:
+    """Render the peer ranking table, one row per company, best composite first."""
+    header = (
+        "| Rank | Company | Revenue | Margins | Balance Sheet | Cash Flow "
+        "| Moat | Governance | Composite |"
+    )
+    divider = "|" + "---|" * 9
+    rows = []
+    for rank, filing in enumerate(ranked, start=1):
+        s = filing.scores
+        rows.append(
+            f"| {rank} | {filing.label} "
+            f"| {_format_score(s.revenue_quality, 5)} "
+            f"| {_format_score(s.margins, 5)} "
+            f"| {_format_score(s.balance_sheet, 5)} "
+            f"| {_format_score(s.cash_flow, 5)} "
+            f"| {_format_score(s.moat, 15)} "
+            f"| {s.governance or 'n/a'} "
+            f"| {_format_score(s.composite, 5)} |"
+        )
+    return "\n".join([header, divider] + rows)
+
+
+def _peer_context(filing: FilingAnalysis) -> str:
+    """The overview, tensions, and bottom-line sections for one company."""
+    sections = split_sections(filing.analysis.text)
+    parts = [sections.get(1), sections.get(8), sections.get(10)]
+    body = "\n\n".join(p for p in parts if p) or "(sections 1/8/10 not found in report)"
+    return f"### COMPANY: {filing.label}\n\n{body}"
+
+
+def analyze_peers(ranked: list[FilingAnalysis], model: str = MODEL) -> SectionResult:
+    """Run the peer-comparison agent over the ranked companies."""
+    user_content = (
+        PEER_COMPARISON_INSTRUCTIONS
+        + "PEER RANKING TABLE (sorted by composite score):\n\n"
+        + build_ranking_table(ranked)
+        + "\n\nPER-COMPANY ANALYSES (in ranking order):\n\n"
+        + "\n\n".join(_peer_context(f) for f in ranked)
+    )
+    return _run_comparison_agent(
+        user_content,
+        model,
+        "peers",
+        "Peer Comparison",
+        "🏁 Analyzing peer group...",
+    )
 
 
 def make_filing_analysis(
