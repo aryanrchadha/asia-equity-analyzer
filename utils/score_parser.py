@@ -80,11 +80,24 @@ def _find_rating(section_text: str | None) -> str | None:
     return re.sub(r"\s+", " ", match.group(1).upper())
 
 
+_COMPOSITE_VALUE = re.compile(r"(\d(?:\.\d+)?)\s*/\s*5\.0")
+
+
 def _find_composite(section_text: str | None) -> float | None:
     if not section_text:
         return None
-    match = re.search(r"(\d(?:\.\d+)?)\s*/\s*5\.0", section_text)
-    return float(match.group(1)) if match else None
+    # Prefer the value on the COMPOSITE table row: the section may show the
+    # moat normalization arithmetic (e.g. "11/15 = 3.7/5.0") before the row,
+    # so the first "/5.0" in the section is not necessarily the composite.
+    for line in section_text.splitlines():
+        if re.search(r"\bCOMPOSITE\b", line):
+            match = _COMPOSITE_VALUE.search(line)
+            if match:
+                return float(match.group(1))
+    # Fall back to the last "/5.0" in the section — the composite row is the
+    # final row of the scorecard table.
+    matches = _COMPOSITE_VALUE.findall(section_text)
+    return float(matches[-1]) if matches else None
 
 
 def parse_scores(report_text: str) -> ScoreCard:

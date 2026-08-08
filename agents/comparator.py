@@ -10,10 +10,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-import anthropic
-
-from config import ANTHROPIC_API_KEY, MODEL, REQUEST_TIMEOUT, SYNTHESIS_MAX_TOKENS
-from agents.orchestrator import MultiAnalysisResult, SectionResult, _call
+from config import MODEL, SYNTHESIS_MAX_TOKENS
+from agents.orchestrator import (
+    MultiAnalysisResult,
+    SectionResult,
+    _call,
+    api_errors,
+    make_client,
+)
 from prompts.comparison import COMPARISON_INSTRUCTIONS
 from prompts.peer_comparison import PEER_COMPARISON_INSTRUCTIONS
 from prompts.section_prompts import BASE_ANALYST_CONTEXT
@@ -94,14 +98,10 @@ def _run_comparison_agent(
     Raises:
         SystemExit: If the API key is missing or the API call fails.
     """
-    if not ANTHROPIC_API_KEY:
-        print("❌ ANTHROPIC_API_KEY is not set. Add it to your .env file.")
-        raise SystemExit(1)
-
-    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY, timeout=REQUEST_TIMEOUT)
+    client = make_client()
 
     print(start_message)
-    try:
+    with api_errors():
         result = _call(
             client,
             [{"type": "text", "text": BASE_ANALYST_CONTEXT}],
@@ -111,15 +111,6 @@ def _run_comparison_agent(
             key,
             title,
         )
-    except anthropic.APIConnectionError as e:
-        print(f"❌ API connection error: {e}")
-        raise SystemExit(1)
-    except anthropic.RateLimitError as e:
-        print(f"❌ Rate limit exceeded: {e}")
-        raise SystemExit(1)
-    except anthropic.APIStatusError as e:
-        print(f"❌ API error (status {e.status_code}): {e.message}")
-        raise SystemExit(1)
 
     print(f"   ✅ {result.title} ({result.elapsed_seconds:.1f}s)")
     if result.truncated:

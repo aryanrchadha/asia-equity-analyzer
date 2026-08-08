@@ -10,6 +10,7 @@ alone to warm the cache before the other five are dispatched in parallel.
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 import time
 
@@ -58,6 +59,30 @@ class MultiAnalysisResult:
     cache_read_tokens: int
     model: str
     sections: list = field(default_factory=list)
+
+
+def make_client() -> anthropic.Anthropic:
+    """Build the API client, exiting with guidance if the key is missing."""
+    if not ANTHROPIC_API_KEY:
+        print("❌ ANTHROPIC_API_KEY is not set. Add it to your .env file.")
+        raise SystemExit(1)
+    return anthropic.Anthropic(api_key=ANTHROPIC_API_KEY, timeout=REQUEST_TIMEOUT)
+
+
+@contextmanager
+def api_errors():
+    """Convert API failures into a clean exit with a user-facing message."""
+    try:
+        yield
+    except anthropic.APIConnectionError as e:
+        print(f"❌ API connection error: {e}")
+        raise SystemExit(1)
+    except anthropic.RateLimitError as e:
+        print(f"❌ Rate limit exceeded: {e}")
+        raise SystemExit(1)
+    except anthropic.APIStatusError as e:
+        print(f"❌ API error (status {e.status_code}): {e.message}")
+        raise SystemExit(1)
 
 
 def _build_system(document_text: str) -> list:
@@ -145,18 +170,14 @@ def analyze_document_multi(document_text: str, model: str = MODEL) -> MultiAnaly
     Raises:
         SystemExit: If the API key is missing or any API call fails.
     """
-    if not ANTHROPIC_API_KEY:
-        print("❌ ANTHROPIC_API_KEY is not set. Add it to your .env file.")
-        raise SystemExit(1)
-
-    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY, timeout=REQUEST_TIMEOUT)
+    client = make_client()
     system = _build_system(document_text)
 
     print(f"🤖 Running {len(SPECIALISTS)} specialist agents on {model}...")
     print(f"   Document length: {len(document_text):,} characters")
 
     sections: list[SectionResult] = []
-    try:
+    with api_errors():
         # Warm the prompt cache with the first specialist, then fan out. The
         # remaining five reuse the cached document instead of re-paying for it.
         sections.append(_run_specialist(client, SPECIALISTS[0], system, model))
@@ -192,15 +213,6 @@ def analyze_document_multi(document_text: str, model: str = MODEL) -> MultiAnaly
                 "Consider raising SYNTHESIS_MAX_TOKENS in config.py."
             )
         sections.append(synthesis)
-    except anthropic.APIConnectionError as e:
-        print(f"❌ API connection error: {e}")
-        raise SystemExit(1)
-    except anthropic.RateLimitError as e:
-        print(f"❌ Rate limit exceeded: {e}")
-        raise SystemExit(1)
-    except anthropic.APIStatusError as e:
-        print(f"❌ API error (status {e.status_code}): {e.message}")
-        raise SystemExit(1)
 
     combined_text = "\n\n".join(s.text for s in sections)
     return MultiAnalysisResult(

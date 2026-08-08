@@ -121,49 +121,66 @@ def estimate_cost(
     )
 
 
+def _multi_agent_stats(analysis) -> list:
+    """Per-agent usage rows for the report's Agent Breakdown table."""
+    return [
+        {
+            "title": s.title,
+            "input_tokens": s.input_tokens + s.cache_creation_tokens + s.cache_read_tokens,
+            "output_tokens": s.output_tokens,
+            "elapsed_seconds": s.elapsed_seconds,
+        }
+        for s in analysis.sections
+    ]
+
+
+def _write_filing_report(doc_info, analysis, elapsed_seconds: float) -> str:
+    """Write one multi-agent filing report and return its path."""
+    cost = estimate_cost(
+        analysis.input_tokens,
+        analysis.output_tokens,
+        analysis.cache_creation_tokens,
+        analysis.cache_read_tokens,
+    )
+    return write_report(
+        analysis_text=analysis.text,
+        source_filename=doc_info.filename,
+        input_tokens=analysis.input_tokens,
+        output_tokens=analysis.output_tokens,
+        elapsed_seconds=elapsed_seconds,
+        estimated_cost=cost,
+        page_count=doc_info.page_count,
+        original_chars=doc_info.original_chars,
+        was_truncated=doc_info.was_truncated,
+        model=analysis.model,
+        pricing_uncertain=analysis.model != MODEL,
+        cache_creation_tokens=analysis.cache_creation_tokens,
+        cache_read_tokens=analysis.cache_read_tokens,
+        agent_stats=_multi_agent_stats(analysis),
+    )
+
+
 def _analyze_filings(paths: list, model: str) -> list:
-    """Run the multi-agent pipeline on each filing and write its report."""
-    filings = []
-    for index, path in enumerate(paths, start=1):
-        print(f"📂 Filing {index}/{len(paths)}")
+    """Run the multi-agent pipeline on each filing and write its report.
+
+    All filings are loaded and validated up front, so a bad path fails fast
+    instead of surfacing only after earlier filings have burned API spend.
+    """
+    documents = []
+    for path in paths:
         doc_info = load_document(filepath=path)
         if doc_info is None:
             sys.exit(1)
+        documents.append(doc_info)
+    print()
 
+    filings = []
+    for index, doc_info in enumerate(documents, start=1):
+        print(f"📂 Filing {index}/{len(documents)}: {doc_info.filename}")
         filing_start = time.time()
         analysis = analyze_document_multi(doc_info.text, model=model)
         filing_elapsed = time.time() - filing_start
-
-        cost = estimate_cost(
-            analysis.input_tokens,
-            analysis.output_tokens,
-            analysis.cache_creation_tokens,
-            analysis.cache_read_tokens,
-        )
-        report_path = write_report(
-            analysis_text=analysis.text,
-            source_filename=doc_info.filename,
-            input_tokens=analysis.input_tokens,
-            output_tokens=analysis.output_tokens,
-            elapsed_seconds=filing_elapsed,
-            estimated_cost=cost,
-            page_count=doc_info.page_count,
-            original_chars=doc_info.original_chars,
-            was_truncated=doc_info.was_truncated,
-            model=analysis.model,
-            pricing_uncertain=analysis.model != MODEL,
-            cache_creation_tokens=analysis.cache_creation_tokens,
-            cache_read_tokens=analysis.cache_read_tokens,
-            agent_stats=[
-                {
-                    "title": s.title,
-                    "input_tokens": s.input_tokens + s.cache_creation_tokens + s.cache_read_tokens,
-                    "output_tokens": s.output_tokens,
-                    "elapsed_seconds": s.elapsed_seconds,
-                }
-                for s in analysis.sections
-            ],
-        )
+        report_path = _write_filing_report(doc_info, analysis, filing_elapsed)
         filings.append(make_filing_analysis(doc_info.filename, analysis, report_path))
         print()
     return filings
@@ -344,15 +361,7 @@ def main():
         analysis = analyze_document_multi(doc_info.text, model=args.model)
         cache_creation = analysis.cache_creation_tokens
         cache_read = analysis.cache_read_tokens
-        agent_stats = [
-            {
-                "title": s.title,
-                "input_tokens": s.input_tokens + s.cache_creation_tokens + s.cache_read_tokens,
-                "output_tokens": s.output_tokens,
-                "elapsed_seconds": s.elapsed_seconds,
-            }
-            for s in analysis.sections
-        ]
+        agent_stats = _multi_agent_stats(analysis)
     elapsed = time.time() - start_time
     print(f"   Analysis time: {elapsed:.1f}s")
     print()
