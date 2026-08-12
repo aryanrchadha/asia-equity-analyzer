@@ -9,6 +9,8 @@ import fitz  # pymupdf
 
 from config import INPUT_DIR, MAX_DOCUMENT_CHARS
 
+VALID_EXTENSIONS = {".pdf", ".txt"}
+
 
 @dataclass
 class DocumentInfo:
@@ -32,12 +34,11 @@ def get_most_recent_file() -> tuple[str, str] | None:
         print(f"❌ Input directory '{INPUT_DIR}' does not exist.")
         return None
 
-    valid_extensions = {".pdf", ".txt"}
     candidates = []
 
     for fname in os.listdir(INPUT_DIR):
         ext = os.path.splitext(fname)[1].lower()
-        if ext in valid_extensions:
+        if ext in VALID_EXTENSIONS:
             fpath = os.path.join(INPUT_DIR, fname)
             mtime = os.path.getmtime(fpath)
             candidates.append((fpath, fname, mtime))
@@ -50,6 +51,32 @@ def get_most_recent_file() -> tuple[str, str] | None:
     candidates.sort(key=lambda x: x[2], reverse=True)
     fpath, fname, _ = candidates[0]
     return fpath, fname
+
+
+def find_documents(directory: str) -> list[str] | None:
+    """List every .pdf/.txt file in a directory, sorted by filename.
+
+    Sorting by name (not mtime) keeps batch runs reproducible across
+    machines and re-downloads.
+
+    Returns:
+        Sorted list of filepaths, or None if the directory is missing or
+        contains no supported files.
+    """
+    if not os.path.isdir(directory):
+        print(f"❌ Directory '{directory}' does not exist.")
+        return None
+
+    paths = [
+        os.path.join(directory, fname)
+        for fname in sorted(os.listdir(directory))
+        if os.path.splitext(fname)[1].lower() in VALID_EXTENSIONS
+        and os.path.isfile(os.path.join(directory, fname))
+    ]
+    if not paths:
+        print(f"❌ No .pdf or .txt files found in '{directory}'.")
+        return None
+    return paths
 
 
 def extract_text_from_pdf(filepath: str) -> tuple[str, int]:

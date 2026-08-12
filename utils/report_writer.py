@@ -216,8 +216,14 @@ def _write_multi_filing_report(
     pricing_uncertain: bool,
     unit_label: str,
     unit_label_plural: str,
+    extra_sections: tuple = (),
+    extra_yaml: dict | None = None,
 ) -> str:
-    """Shared writer for reports that aggregate several analyzed filings."""
+    """Shared writer for reports that aggregate several analyzed filings.
+
+    `extra_sections` is a sequence of (heading, markdown) pairs rendered after
+    the main table; `extra_yaml` adds scalar fields to the front matter.
+    """
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
     timestamp = datetime.now()
@@ -245,12 +251,17 @@ def _write_multi_filing_report(
         for i, f in enumerate(filings)
     )
 
+    extra_yaml_lines = "".join(
+        f"{key}: {json.dumps(value, ensure_ascii=False)}\n"
+        for key, value in (extra_yaml or {}).items()
+    )
+
     yaml_header = f"""\
 ---
 report_type: {report_type}
 source_files: {json.dumps(source_files, ensure_ascii=False)}
 {unit_label}_count: {len(filings)}
-analysis_date: {date_display}
+{extra_yaml_lines}analysis_date: {date_display}
 model: {json.dumps(model, ensure_ascii=False)}
 input_tokens: {input_tokens}
 cache_creation_tokens: {cache_creation_tokens}
@@ -263,6 +274,10 @@ pricing_uncertain: {str(pricing_uncertain).lower()}
 ---
 
 """
+
+    extra_blocks = "".join(
+        f"\n## {heading}\n\n{content}\n" for heading, content in extra_sections
+    )
 
     body = f"""\
 > **Asia Equity Analyzer — {banner_title}** — Generated {date_display}
@@ -280,7 +295,7 @@ pricing_uncertain: {str(pricing_uncertain).lower()}
 ## {table_heading}
 
 {score_table}
-{cost_footnote}
+{extra_blocks}{cost_footnote}
 ---
 
 {narrative_text}
@@ -341,6 +356,83 @@ def write_comparison_report(
         pricing_uncertain=pricing_uncertain,
         unit_label="period",
         unit_label_plural="Periods",
+    )
+
+
+def write_batch_report(
+    ranking_table: str,
+    stats_table: str,
+    governance_table: str,
+    sector_text: str,
+    filings: list,
+    skipped: list,
+    model: str,
+    input_tokens: int,
+    output_tokens: int,
+    cache_creation_tokens: int,
+    cache_read_tokens: int,
+    elapsed_seconds: float,
+    estimated_cost: float,
+    pricing_uncertain: bool = False,
+) -> str:
+    """Write the batch sector report.
+
+    Args:
+        ranking_table: Companies sorted by composite score.
+        stats_table: Per-dimension sector statistics.
+        governance_table: Governance rating distribution.
+        sector_text: The sector-summary agent's output.
+        filings: Successfully analyzed companies, in ranking order.
+        skipped: (filename, reason) pairs for filings that were not analyzed.
+            Always rendered when non-empty — a sector read over a partial
+            batch must say so rather than implying full coverage.
+
+    Returns:
+        Path to the written batch report.
+    """
+    extra_sections = [
+        ("Sector Statistics", stats_table),
+        ("Governance Distribution", governance_table),
+    ]
+    if skipped:
+        skipped_rows = "".join(
+            f"| {_safe_code_span(_escape_table_cell(name))} "
+            f"| {_escape_table_cell(reason)} |\n"
+            for name, reason in skipped
+        )
+        extra_sections.append(
+            (
+                f"Skipped Filings ({len(skipped)})",
+                "*These filings are excluded from every table and from the sector "
+                "summary below.*\n\n"
+                "| Source File | Reason |\n|-------------|--------|\n" + skipped_rows,
+            )
+        )
+
+    return _write_multi_filing_report(
+        report_type="batch_sector_summary",
+        filename_prefix="sector",
+        banner_title="Sector Batch",
+        filings_heading="Companies Analyzed (ranking order)",
+        table_heading="Sector Ranking",
+        score_table=ranking_table,
+        narrative_text=sector_text,
+        filings=filings,
+        model=model,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cache_creation_tokens=cache_creation_tokens,
+        cache_read_tokens=cache_read_tokens,
+        elapsed_seconds=elapsed_seconds,
+        estimated_cost=estimated_cost,
+        pricing_uncertain=pricing_uncertain,
+        unit_label="company",
+        unit_label_plural="Companies",
+        extra_sections=tuple(extra_sections),
+        extra_yaml={
+            "skipped_count": len(skipped),
+            "skipped_files": [name for name, _ in skipped],
+        },
     )
 
 

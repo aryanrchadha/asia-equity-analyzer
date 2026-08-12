@@ -20,6 +20,7 @@ from agents.orchestrator import (
 )
 from prompts.comparison import COMPARISON_INSTRUCTIONS
 from prompts.peer_comparison import PEER_COMPARISON_INSTRUCTIONS
+from prompts.sector_summary import SECTOR_SUMMARY_INSTRUCTIONS
 from prompts.section_prompts import BASE_ANALYST_CONTEXT
 from utils.score_parser import (
     GOVERNANCE_TO_NUMERIC,
@@ -27,6 +28,7 @@ from utils.score_parser import (
     parse_scores,
     split_sections,
 )
+from utils.sector_stats import build_governance_table, build_stats_table
 
 
 @dataclass
@@ -198,6 +200,55 @@ def analyze_peers(ranked: list[FilingAnalysis], model: str = MODEL) -> SectionRe
         "peers",
         "Peer Comparison",
         "🏁 Analyzing peer group...",
+    )
+
+
+def _bottom_line_context(filing: FilingAnalysis) -> str:
+    """Just the bottom line for one company — batches can hold many filings."""
+    sections = split_sections(filing.analysis.text)
+    body = sections.get(10) or "(section 10 not found in report)"
+    return f"### COMPANY: {filing.label}\n\n{body}"
+
+
+def analyze_sector(
+    ranked: list[FilingAnalysis],
+    model: str = MODEL,
+    skipped: list | None = None,
+) -> SectionResult:
+    """Run the sector-summary agent over a batch of analyzed companies.
+
+    Args:
+        ranked: Companies in ranking order.
+        model: Claude model ID.
+        skipped: (filename, reason) pairs for filings that were not analyzed,
+            surfaced to the agent so its conclusions acknowledge the gap.
+    """
+    coverage = ""
+    if skipped:
+        listed = "\n".join(f"- {name}: {reason}" for name, reason in skipped)
+        coverage = (
+            f"\n\nCOVERAGE GAP — {len(skipped)} filing(s) in this batch could not be "
+            f"analyzed and are absent from every table above:\n{listed}\n"
+        )
+
+    user_content = (
+        SECTOR_SUMMARY_INSTRUCTIONS
+        + "SECTOR RANKING TABLE (sorted by composite score):\n\n"
+        + build_ranking_table(ranked)
+        + "\n\nPER-DIMENSION SECTOR STATISTICS:\n\n"
+        + build_stats_table(ranked)
+        + "\n\nGOVERNANCE DISTRIBUTION:\n\n"
+        + build_governance_table(ranked)
+        + coverage
+        + "\n\nPER-COMPANY BOTTOM LINES (in ranking order):\n\n"
+        + "\n\n".join(_bottom_line_context(f) for f in ranked)
+    )
+    return _run_comparison_agent(
+        user_content,
+        model,
+        "sector",
+        "Sector Summary",
+        "🗺️  Summarizing sector...",
     )
 
 

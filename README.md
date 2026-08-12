@@ -99,6 +99,24 @@ Each company gets its own full multi-agent report, then a peer agent produces `o
 - **Sector ranking rationale** — where the composite agrees with the qualitative read and where it misleads; near-ties (within 0.3) get an explicit tiebreak call
 - **Relative strengths and weaknesses** per company, and a **top pick / avoid** verdict with comparison caveats (fiscal period mismatches, reporting standards, disclosure gaps)
 
+### Batch / Sector Screen
+
+To screen a whole folder of filings — one company per file — point `--batch` at the directory:
+
+```bash
+python main.py --batch input/semiconductors
+python main.py --batch input/semiconductors --batch-limit 10   # cap the spend
+```
+
+Files are analyzed in filename order (so runs are reproducible), each getting its own report, then a sector agent produces `output/sector_<company>_<timestamp>.md` containing:
+
+- A **sector ranking** table, same shape as `--peers`
+- **Per-dimension statistics** computed in Python — coverage, mean, median, min, max, spread, and which company is highest and lowest on each dimension. A narrow spread means the dimension is a sector-wide trait; a wide one is where stock selection actually matters.
+- A **governance distribution** table
+- **Sector shape, outliers and clusters, and screening conclusions** — which companies deserve deeper work and which can be screened out
+
+Batch mode is built to survive a messy directory: a filing that can't be loaded or whose analysis fails is skipped, listed in a **Skipped Filings** section of the report, and named in the sector agent's own context so its conclusions acknowledge the gap. Filings dropped by `--batch-limit` are listed the same way — nothing is silently omitted. Three consecutive analysis failures stop the run, since that means the problem is your credentials or quota rather than the documents.
+
 ### Watchlist
 
 Add `--watch` to any analysis run to record its scores to a persistent store and get alerted when a company moves materially:
@@ -201,6 +219,7 @@ asia-equity-analyzer/
 │   ├── document_loader.py   # PDF/text extraction
 │   ├── report_writer.py     # Markdown report output
 │   ├── score_parser.py      # Extract SCORE/RATING lines from finished reports
+│   ├── sector_stats.py      # Aggregate statistics across a batch
 │   └── watchlist.py         # Persistent score history + move alerts
 ├── watchlist.json           # Score history (created on first --watch run)
 ├── input/                   # Drop files here
@@ -256,7 +275,8 @@ Each report includes an **Agent Breakdown** table with per-agent token usage and
 - ✅ **Week 3** — cross-period comparison (`--compare`): per-filing multi-agent reports, a deterministic score-delta table, and a trajectory analysis agent
 - ✅ **Week 4** — peer comparison (`--peers`): rank companies in the same sector on the composite scorecard with a top pick / avoid verdict
 - ✅ **Week 5** — watchlist (`--watch` / `--show-watchlist`): persistent score history with composite-move and governance-change alerts
-- 🗓️ **Week 6** — batch mode: analyze a whole directory of filings in one run, with a sector-level summary
+- ✅ **Week 6** — batch mode (`--batch`): screen a directory of filings with aggregate sector statistics, resilient to bad files
+- 🗓️ **Week 7** — HTML export: render reports and the sector screen as a styled, shareable page
 
 ## License
 
