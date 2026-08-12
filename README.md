@@ -71,6 +71,75 @@ To use the original single-agent mode instead:
 python main.py --single
 ```
 
+### Cross-Period Comparison
+
+To track how a company's scores evolve across filings, pass two or more reports of the same company in chronological order (earliest first):
+
+```bash
+python main.py --compare input/tencent_fy2022.pdf input/tencent_fy2023.pdf input/tencent_fy2024.pdf
+```
+
+Each filing gets its own full multi-agent report, then a comparison agent produces `output/comparison_<company>_<timestamp>.md` containing:
+
+- A **score trajectory table** — every scored dimension per period plus a first-to-last delta, built deterministically from the `SCORE: X/N` lines in each report (no model re-scoring)
+- **Thesis evolution** — which tensions resolved, worsened, or persist across every period
+- A **trajectory bottom line** — improving/stable/deteriorating call and what the next filing must show
+
+### Peer Comparison
+
+To rank companies in the same sector against each other, pass one filing per company:
+
+```bash
+python main.py --peers input/tencent_fy2024.pdf input/alibaba_fy2024.pdf input/netease_fy2024.pdf
+```
+
+Each company gets its own full multi-agent report, then a peer agent produces `output/peers_<company>_<timestamp>.md` containing:
+
+- A **peer ranking table** — every scored dimension per company, sorted by composite score (companies with unparseable composites rank last)
+- **Sector ranking rationale** — where the composite agrees with the qualitative read and where it misleads; near-ties (within 0.3) get an explicit tiebreak call
+- **Relative strengths and weaknesses** per company, and a **top pick / avoid** verdict with comparison caveats (fiscal period mismatches, reporting standards, disclosure gaps)
+
+### Batch / Sector Screen
+
+To screen a whole folder of filings — one company per file — point `--batch` at the directory:
+
+```bash
+python main.py --batch input/semiconductors
+python main.py --batch input/semiconductors --batch-limit 10   # cap the spend
+```
+
+Files are analyzed in filename order (so runs are reproducible), each getting its own report, then a sector agent produces `output/sector_<company>_<timestamp>.md` containing:
+
+- A **sector ranking** table, same shape as `--peers`
+- **Per-dimension statistics** computed in Python — coverage, mean, median, min, max, spread, and which company is highest and lowest on each dimension. A narrow spread means the dimension is a sector-wide trait; a wide one is where stock selection actually matters.
+- A **governance distribution** table
+- **Sector shape, outliers and clusters, and screening conclusions** — which companies deserve deeper work and which can be screened out
+
+Batch mode is built to survive a messy directory: a filing that can't be loaded or whose analysis fails is skipped, listed in a **Skipped Filings** section of the report, and named in the sector agent's own context so its conclusions acknowledge the gap. Filings dropped by `--batch-limit` are listed the same way — nothing is silently omitted. Three consecutive analysis failures stop the run, since that means the problem is your credentials or quota rather than the documents.
+
+### Watchlist
+
+Add `--watch` to any analysis run to record its scores to a persistent store and get alerted when a company moves materially:
+
+```bash
+python main.py --file input/tencent_fy2024.pdf --watch tencent
+python main.py --peers input/tencent.pdf input/alibaba.pdf --watch
+python main.py --show-watchlist
+```
+
+The company name is optional — pass one (`--watch tencent`) to keep filings whose filenames differ under a single entry, or omit it to name the entry after the file. Scores land in `watchlist.json` (a plain, diffable JSON file you can commit alongside your reports), and each run is compared against that company's previous entry:
+
+- **Composite moves** of at least `--alert-threshold` points (default 0.5 out of 5.0) are flagged, with direction
+- **Governance rating changes** are always flagged — a slide into `CONCERNING` or `RED FLAG` is material regardless of the composite
+
+```
+🔔 Watchlist alerts (threshold ±0.5):
+   ⚠️  tencent: composite deteriorated 4.1 → 3.4 (-0.7, threshold ±0.5)
+   ✅ alibaba: governance rating CONCERNING → ADEQUATE
+```
+
+`--show-watchlist` prints the current table (companies, filing count, latest and previous composite, delta, governance, last updated) and makes no API calls. Watchlist recording requires the multi-agent pipeline, since only its prompts emit the explicit `SCORE` lines the store reads.
+
 ### Example Console Output
 
 ```
@@ -140,13 +209,19 @@ asia-equity-analyzer/
 ├── config.py                # Model settings, dirs, cost constants
 ├── agents/
 │   ├── analyst.py           # Single-agent mode (one Claude API call)
-│   └── orchestrator.py      # Multi-agent mode: 6 parallel specialists + synthesis
+│   ├── orchestrator.py      # Multi-agent mode: 6 parallel specialists + synthesis
+│   └── comparator.py        # Cross-period comparison: score deltas + trajectory agent
 ├── prompts/
 │   ├── financial_analysis.py  # Single-agent system prompt
-│   └── section_prompts.py     # Specialist + synthesis prompts (multi-agent)
+│   ├── section_prompts.py     # Specialist + synthesis prompts (multi-agent)
+│   └── comparison.py          # Cross-period trajectory prompt
 ├── utils/
 │   ├── document_loader.py   # PDF/text extraction
-│   └── report_writer.py     # Markdown report output
+│   ├── report_writer.py     # Markdown report output
+│   ├── score_parser.py      # Extract SCORE/RATING lines from finished reports
+│   ├── sector_stats.py      # Aggregate statistics across a batch
+│   └── watchlist.py         # Persistent score history + move alerts
+├── watchlist.json           # Score history (created on first --watch run)
 ├── input/                   # Drop files here
 ├── output/                  # Reports appear here
 ├── .env                     # API key (gitignored)
@@ -170,7 +245,7 @@ Using Claude Sonnet 4 pricing ($3/M input, $15/M output):
 - Documents over 180,000 characters are truncated (later sections may be cut)
 - Analysis quality depends on the quality of the source document
 - Financial figures are extracted as-is — no independent verification
-- The tool analyzes one filing at a time; cross-period comparisons are limited to what's in the single report
+- Cross-period comparison (`--compare`) assumes the filings are for the same company and given in chronological order — it does not verify either
 
 ## Multi-Agent Architecture
 
@@ -197,7 +272,11 @@ Each report includes an **Agent Breakdown** table with per-agent token usage and
 ## Roadmap
 
 - ✅ **Week 2** — six parallel financial analysis agents with specialized prompts, prompt caching, and a synthesis pass
-- 🗓️ **Week 3** — cross-period comparison: analyze multiple filings of the same company and track score deltas over time
+- ✅ **Week 3** — cross-period comparison (`--compare`): per-filing multi-agent reports, a deterministic score-delta table, and a trajectory analysis agent
+- ✅ **Week 4** — peer comparison (`--peers`): rank companies in the same sector on the composite scorecard with a top pick / avoid verdict
+- ✅ **Week 5** — watchlist (`--watch` / `--show-watchlist`): persistent score history with composite-move and governance-change alerts
+- ✅ **Week 6** — batch mode (`--batch`): screen a directory of filings with aggregate sector statistics, resilient to bad files
+- 🗓️ **Week 7** — HTML export: render reports and the sector screen as a styled, shareable page
 
 ## License
 

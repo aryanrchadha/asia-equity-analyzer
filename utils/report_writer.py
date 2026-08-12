@@ -195,3 +195,278 @@ pricing_uncertain: {str(pricing_uncertain).lower()}
 
     print(f"📝 Report written: {output_path}")
     return output_path
+
+
+def _write_multi_filing_report(
+    report_type: str,
+    filename_prefix: str,
+    banner_title: str,
+    filings_heading: str,
+    table_heading: str,
+    score_table: str,
+    narrative_text: str,
+    filings: list,
+    model: str,
+    input_tokens: int,
+    output_tokens: int,
+    cache_creation_tokens: int,
+    cache_read_tokens: int,
+    elapsed_seconds: float,
+    estimated_cost: float,
+    pricing_uncertain: bool,
+    unit_label: str,
+    unit_label_plural: str,
+    extra_sections: tuple = (),
+    extra_yaml: dict | None = None,
+) -> str:
+    """Shared writer for reports that aggregate several analyzed filings.
+
+    `extra_sections` is a sequence of (heading, markdown) pairs rendered after
+    the main table; `extra_yaml` adds scalar fields to the front matter.
+    """
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+    timestamp = datetime.now()
+    timestamp_str = timestamp.strftime("%Y-%m-%d_%H%M%S")
+    date_display = timestamp.strftime("%Y-%m-%d %H:%M:%S")
+
+    base = sanitize_filename(filings[0].filename)
+    output_path = os.path.join(OUTPUT_DIR, f"{filename_prefix}_{base}_{timestamp_str}.md")
+
+    total_tokens = input_tokens + cache_creation_tokens + cache_read_tokens + output_tokens
+    source_files = [f.filename for f in filings]
+
+    model_span = _safe_code_span(model)
+    default_model_span = _safe_code_span(MODEL)
+    cost_footnote = (
+        f"\n*⚠️ Cost estimate uses {default_model_span} pricing constants but the responses "
+        f"came from {model_span} — actual cost may differ.*\n"
+        if pricing_uncertain
+        else ""
+    )
+
+    filing_rows = "".join(
+        f"| {i + 1} | {_safe_code_span(_escape_table_cell(f.filename))} "
+        f"| {_safe_code_span(_escape_table_cell(f.report_path))} |\n"
+        for i, f in enumerate(filings)
+    )
+
+    extra_yaml_lines = "".join(
+        f"{key}: {json.dumps(value, ensure_ascii=False)}\n"
+        for key, value in (extra_yaml or {}).items()
+    )
+
+    yaml_header = f"""\
+---
+report_type: {report_type}
+source_files: {json.dumps(source_files, ensure_ascii=False)}
+{unit_label}_count: {len(filings)}
+{extra_yaml_lines}analysis_date: {date_display}
+model: {json.dumps(model, ensure_ascii=False)}
+input_tokens: {input_tokens}
+cache_creation_tokens: {cache_creation_tokens}
+cache_read_tokens: {cache_read_tokens}
+output_tokens: {output_tokens}
+total_tokens: {total_tokens}
+elapsed_seconds: {elapsed_seconds:.1f}
+estimated_cost_usd: {estimated_cost:.4f}
+pricing_uncertain: {str(pricing_uncertain).lower()}
+---
+
+"""
+
+    extra_blocks = "".join(
+        f"\n## {heading}\n\n{content}\n" for heading, content in extra_sections
+    )
+
+    body = f"""\
+> **Asia Equity Analyzer — {banner_title}** — Generated {date_display}
+> {unit_label_plural}: {len(filings)} | Model: {model_span} | Tokens: {total_tokens:,} | Cost: ${estimated_cost:.4f}
+
+---
+
+## {filings_heading}
+
+| # | Source File | Full Report |
+|---|-------------|-------------|
+{filing_rows}
+---
+
+## {table_heading}
+
+{score_table}
+{extra_blocks}{cost_footnote}
+---
+
+{narrative_text}
+"""
+
+    with open(output_path, "w", encoding="utf-8") as f:
+        f.write(yaml_header + body)
+
+    print(f"📝 {banner_title} report written: {output_path}")
+    return output_path
+
+
+def write_comparison_report(
+    score_table: str,
+    trajectory_text: str,
+    filings: list,
+    model: str,
+    input_tokens: int,
+    output_tokens: int,
+    cache_creation_tokens: int,
+    cache_read_tokens: int,
+    elapsed_seconds: float,
+    estimated_cost: float,
+    pricing_uncertain: bool = False,
+) -> str:
+    """Write the cross-period comparison report.
+
+    Args:
+        score_table: Rendered markdown score-trajectory table.
+        trajectory_text: The trend-analysis agent's output.
+        filings: FilingAnalysis objects in chronological order.
+        model: Model that produced the analyses.
+        input_tokens/output_tokens/cache_*: Aggregate usage across all filings
+            and the trajectory call.
+        elapsed_seconds: Total wall-clock time for the comparison run.
+        estimated_cost: Estimated USD cost for the whole run.
+        pricing_uncertain: True if `model` differs from the pricing baseline.
+
+    Returns:
+        Path to the written comparison report.
+    """
+    return _write_multi_filing_report(
+        report_type="cross_period_comparison",
+        filename_prefix="comparison",
+        banner_title="Cross-Period Comparison",
+        filings_heading="Filings Compared (chronological)",
+        table_heading="Score Trajectory",
+        score_table=score_table,
+        narrative_text=trajectory_text,
+        filings=filings,
+        model=model,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cache_creation_tokens=cache_creation_tokens,
+        cache_read_tokens=cache_read_tokens,
+        elapsed_seconds=elapsed_seconds,
+        estimated_cost=estimated_cost,
+        pricing_uncertain=pricing_uncertain,
+        unit_label="period",
+        unit_label_plural="Periods",
+    )
+
+
+def write_batch_report(
+    ranking_table: str,
+    stats_table: str,
+    governance_table: str,
+    sector_text: str,
+    filings: list,
+    skipped: list,
+    model: str,
+    input_tokens: int,
+    output_tokens: int,
+    cache_creation_tokens: int,
+    cache_read_tokens: int,
+    elapsed_seconds: float,
+    estimated_cost: float,
+    pricing_uncertain: bool = False,
+) -> str:
+    """Write the batch sector report.
+
+    Args:
+        ranking_table: Companies sorted by composite score.
+        stats_table: Per-dimension sector statistics.
+        governance_table: Governance rating distribution.
+        sector_text: The sector-summary agent's output.
+        filings: Successfully analyzed companies, in ranking order.
+        skipped: (filename, reason) pairs for filings that were not analyzed.
+            Always rendered when non-empty — a sector read over a partial
+            batch must say so rather than implying full coverage.
+
+    Returns:
+        Path to the written batch report.
+    """
+    extra_sections = [
+        ("Sector Statistics", stats_table),
+        ("Governance Distribution", governance_table),
+    ]
+    if skipped:
+        skipped_rows = "".join(
+            f"| {_safe_code_span(_escape_table_cell(name))} "
+            f"| {_escape_table_cell(reason)} |\n"
+            for name, reason in skipped
+        )
+        extra_sections.append(
+            (
+                f"Skipped Filings ({len(skipped)})",
+                "*These filings are excluded from every table and from the sector "
+                "summary below.*\n\n"
+                "| Source File | Reason |\n|-------------|--------|\n" + skipped_rows,
+            )
+        )
+
+    return _write_multi_filing_report(
+        report_type="batch_sector_summary",
+        filename_prefix="sector",
+        banner_title="Sector Batch",
+        filings_heading="Companies Analyzed (ranking order)",
+        table_heading="Sector Ranking",
+        score_table=ranking_table,
+        narrative_text=sector_text,
+        filings=filings,
+        model=model,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cache_creation_tokens=cache_creation_tokens,
+        cache_read_tokens=cache_read_tokens,
+        elapsed_seconds=elapsed_seconds,
+        estimated_cost=estimated_cost,
+        pricing_uncertain=pricing_uncertain,
+        unit_label="company",
+        unit_label_plural="Companies",
+        extra_sections=tuple(extra_sections),
+        extra_yaml={
+            "skipped_count": len(skipped),
+            "skipped_files": [name for name, _ in skipped],
+        },
+    )
+
+
+def write_peer_report(
+    ranking_table: str,
+    peer_text: str,
+    filings: list,
+    model: str,
+    input_tokens: int,
+    output_tokens: int,
+    cache_creation_tokens: int,
+    cache_read_tokens: int,
+    elapsed_seconds: float,
+    estimated_cost: float,
+    pricing_uncertain: bool = False,
+) -> str:
+    """Write the peer-comparison report (filings in ranking order, best first)."""
+    return _write_multi_filing_report(
+        report_type="peer_comparison",
+        filename_prefix="peers",
+        banner_title="Peer Comparison",
+        filings_heading="Companies Compared (ranking order)",
+        table_heading="Peer Ranking",
+        score_table=ranking_table,
+        narrative_text=peer_text,
+        filings=filings,
+        model=model,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cache_creation_tokens=cache_creation_tokens,
+        cache_read_tokens=cache_read_tokens,
+        elapsed_seconds=elapsed_seconds,
+        estimated_cost=estimated_cost,
+        pricing_uncertain=pricing_uncertain,
+        unit_label="company",
+        unit_label_plural="Companies",
+    )
