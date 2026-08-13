@@ -14,6 +14,7 @@ install_stubs()
 
 from utils.report_writer import MAX_NAME_BYTES, sanitize_filename, write_report  # noqa: E402
 
+
 class TestSanitizeFilename(unittest.TestCase):
     def test_ordinary_names_are_lowercased_and_underscored(self):
         assert sanitize_filename("Tencent FY2024.pdf") == "tencent_fy2024"
@@ -54,6 +55,7 @@ class TestSanitizeFilename(unittest.TestCase):
     def test_truncation_does_not_split_a_character(self):
         sanitize_filename("腾" * 200 + ".pdf").encode("utf-8").decode("utf-8")
 
+
 class TestWriteReport(unittest.TestCase):
     def setUp(self):
         temp_workspace()
@@ -86,6 +88,7 @@ class TestWriteReport(unittest.TestCase):
             body = f.read()
         stats = [line for line in body.splitlines() if line.startswith("| Source File")][0]
         assert r"\|" in stats
+
 
 if __name__ == "__main__":
     unittest.main()
