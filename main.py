@@ -11,7 +11,8 @@ synthesis agent. Use --single for the original single-agent mode, or --compare
 to analyze multiple filings of the same company and track score deltas, or
 --peers to rank multiple companies in the same sector, or --batch to screen a
 whole directory. Add --watch to record scores to the persistent watchlist and
-get alerted on material moves.
+get alerted on material moves. Add --html to render each report as a
+self-contained HTML page.
 
 Usage:
     python main.py
@@ -21,6 +22,8 @@ Usage:
     python main.py --peers tencent.pdf alibaba.pdf netease.pdf
     python main.py --file tencent_fy2024.pdf --watch tencent
     python main.py --batch input/semis --batch-limit 10
+    python main.py --batch input/semis --html
+    python main.py --export-html output/tencent_2026-08-12_140000.md
     python main.py --show-watchlist
 """
 
@@ -41,6 +44,7 @@ from config import (
     WATCHLIST_PATH,
 )
 from utils.document_loader import find_documents, load_document
+from utils.html_export import export_markdown_file
 from utils.report_writer import (
     sanitize_filename,
     write_batch_report,
@@ -135,6 +139,19 @@ def parse_args() -> argparse.Namespace:
         "listed in the report, never silently omitted.",
     )
     parser.add_argument(
+        "--html",
+        action="store_true",
+        help="Also render every report this run produces as a self-contained "
+        "HTML page next to the markdown.",
+    )
+    parser.add_argument(
+        "--export-html",
+        nargs="+",
+        metavar="PATH",
+        default=None,
+        help="Render existing markdown reports as HTML and exit. Makes no API calls.",
+    )
+    parser.add_argument(
         "--watch",
         nargs="?",
         const="",
@@ -212,6 +229,22 @@ def parse_args() -> argparse.Namespace:
                 f"{flag} analyzes different companies; each is named from its "
                 "filename. Use --watch without a company name."
             )
+    if args.export_html is not None:
+        conflicting = [
+            name
+            for name, value in (
+                ("--compare", args.compare), ("--peers", args.peers),
+                ("--batch", args.batch), ("--file", args.file),
+                ("--html", args.html), ("--show-watchlist", args.show_watchlist),
+                ("--watch", args.watch is not None),
+            )
+            if value
+        ]
+        if conflicting:
+            parser.error(
+                f"--export-html converts existing reports and exits; drop "
+                f"{', '.join(conflicting)}."
+            )
     if args.alert_threshold < 0:
         parser.error("--alert-threshold must be zero or positive.")
     return args
@@ -245,7 +278,9 @@ def _multi_agent_stats(analysis) -> list:
     ]
 
 
-def _write_filing_report(doc_info, analysis, elapsed_seconds: float) -> str:
+def _write_filing_report(
+    doc_info, analysis, elapsed_seconds: float, export_html: bool = False
+) -> str:
     """Write one multi-agent filing report and return its path."""
     cost = estimate_cost(
         analysis.input_tokens,
@@ -253,7 +288,7 @@ def _write_filing_report(doc_info, analysis, elapsed_seconds: float) -> str:
         analysis.cache_creation_tokens,
         analysis.cache_read_tokens,
     )
-    return write_report(
+    path = write_report(
         analysis_text=analysis.text,
         source_filename=doc_info.filename,
         input_tokens=analysis.input_tokens,
@@ -269,9 +304,14 @@ def _write_filing_report(doc_info, analysis, elapsed_seconds: float) -> str:
         cache_read_tokens=analysis.cache_read_tokens,
         agent_stats=_multi_agent_stats(analysis),
     )
+    if export_html:
+        export_markdown_file(path)
+    return path
 
 
-def _analyze_filings(paths: list, model: str, skip_failures: bool = False) -> tuple:
+def _analyze_filings(
+    paths: list, model: str, skip_failures: bool = False, export_html: bool = False
+) -> tuple:
     """Run the multi-agent pipeline on each filing and write its report.
 
     All filings are loaded and validated up front, so a bad path fails fast
@@ -329,7 +369,9 @@ def _analyze_filings(paths: list, model: str, skip_failures: bool = False) -> tu
 
         consecutive_failures = 0
         filing_elapsed = time.time() - filing_start
-        report_path = _write_filing_report(doc_info, analysis, filing_elapsed)
+        report_path = _write_filing_report(
+            doc_info, analysis, filing_elapsed, export_html=export_html
+        )
         filings.append(make_filing_analysis(doc_info.filename, analysis, report_path))
         print()
     return filings, skipped
@@ -421,6 +463,33 @@ def _record_watchlist(args, records: list) -> None:
     print()
 
 
+def run_export_html(args) -> None:
+    """Render existing markdown reports as HTML without making any API calls."""
+    print()
+    print("=" * 60)
+    print("  🌐 Asia Equity Analyzer — HTML Export")
+    print(f"  {len(args.export_html)} report(s)")
+    print("=" * 60)
+    print()
+
+    failures = []
+    for path in args.export_html:
+        if not os.path.isfile(path):
+            print(f"❌ Not found: {path}")
+            failures.append(path)
+            continue
+        try:
+            export_markdown_file(path)
+        except OSError as e:
+            print(f"❌ Could not export '{path}': {e}")
+            failures.append(path)
+
+    print()
+    if failures:
+        print(f"⚠️  {len(failures)} of {len(args.export_html)} report(s) failed to export.")
+        sys.exit(1)
+
+
 def run_show_watchlist(args) -> None:
     """Print the watchlist table and exit without making any API calls."""
     try:
@@ -462,7 +531,7 @@ def run_comparison(args) -> None:
     print()
 
     start_time = time.time()
-    filings, _ = _analyze_filings(args.compare, args.model)
+    filings, _ = _analyze_filings(args.compare, args.model, export_html=args.html)
     trajectory = analyze_trajectory(filings, model=args.model)
     elapsed = time.time() - start_time
 
@@ -483,6 +552,8 @@ def run_comparison(args) -> None:
         estimated_cost=total_cost,
         pricing_uncertain=pricing_uncertain,
     )
+    if args.html:
+        export_markdown_file(output_path)
     _print_group_summary(
         "COMPARISON SUMMARY", "Period report:", filings, output_path,
         trajectory.model, usage, total_cost, elapsed,
@@ -513,7 +584,7 @@ def run_peers(args) -> None:
     print()
 
     start_time = time.time()
-    filings, _ = _analyze_filings(args.peers, args.model)
+    filings, _ = _analyze_filings(args.peers, args.model, export_html=args.html)
     ranked = rank_peers(filings)
     peer_analysis = analyze_peers(ranked, model=args.model)
     elapsed = time.time() - start_time
@@ -535,6 +606,8 @@ def run_peers(args) -> None:
         estimated_cost=total_cost,
         pricing_uncertain=pricing_uncertain,
     )
+    if args.html:
+        export_markdown_file(output_path)
     _print_group_summary(
         "PEER SUMMARY", "Company report:", ranked, output_path,
         peer_analysis.model, usage, total_cost, elapsed,
@@ -582,7 +655,9 @@ def run_batch(args) -> None:
         print()
 
     start_time = time.time()
-    filings, skipped = _analyze_filings(paths, args.model, skip_failures=True)
+    filings, skipped = _analyze_filings(
+        paths, args.model, skip_failures=True, export_html=args.html
+    )
     skipped = skipped + dropped
 
     if len(filings) < 2:
@@ -620,6 +695,8 @@ def run_batch(args) -> None:
         estimated_cost=total_cost,
         pricing_uncertain=pricing_uncertain,
     )
+    if args.html:
+        export_markdown_file(output_path)
     _print_group_summary(
         "SECTOR SUMMARY", "Company report:", ranked, output_path,
         sector.model, usage, total_cost, elapsed,
@@ -643,6 +720,9 @@ def run_batch(args) -> None:
 def main():
     args = parse_args()
 
+    if args.export_html:
+        run_export_html(args)
+        return
     if args.show_watchlist:
         run_show_watchlist(args)
         return
@@ -747,6 +827,10 @@ def main():
     print(f"  Time elapsed:   {elapsed:.1f}s")
     print("─" * 60)
     print()
+
+    if args.html:
+        export_markdown_file(output_path)
+        print()
 
     # Step 5: Watchlist
     if args.watch is not None:

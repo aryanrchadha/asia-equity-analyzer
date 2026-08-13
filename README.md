@@ -117,6 +117,19 @@ Files are analyzed in filename order (so runs are reproducible), each getting it
 
 Batch mode is built to survive a messy directory: a filing that can't be loaded or whose analysis fails is skipped, listed in a **Skipped Filings** section of the report, and named in the sector agent's own context so its conclusions acknowledge the gap. Filings dropped by `--batch-limit` are listed the same way — nothing is silently omitted. Three consecutive analysis failures stop the run, since that means the problem is your credentials or quota rather than the documents.
 
+### HTML Export
+
+Add `--html` to any run to render each report it produces as a self-contained HTML page beside the markdown, or convert reports you already have:
+
+```bash
+python main.py --batch input/semiconductors --html
+python main.py --export-html output/tencent_2026-08-12_140000.md   # no API calls
+```
+
+The page is a single file with no external requests — styles are embedded, so it renders identically over email, a shared drive, or a static host, and works offline. It adapts to light and dark, keeps wide score tables scrollable on mobile, aligns numeric columns with tabular figures, lifts the run's metadata out of the YAML front matter into a header, and prints cleanly to PDF.
+
+The markdown renderer is deliberately hand-written rather than pulled from a library: report bodies are model-generated text derived from untrusted filings, and the common markdown libraries pass raw HTML straight through. Here every character is escaped **before** any formatting is applied, so a filing containing a `<script>` tag renders as visible text rather than executing in the browser of whoever you share the page with. Link targets are restricted to `http(s)`, `mailto`, and relative paths for the same reason.
+
 ### Watchlist
 
 Add `--watch` to any analysis run to record its scores to a persistent store and get alerted when a company moves materially:
@@ -217,6 +230,7 @@ asia-equity-analyzer/
 │   └── comparison.py          # Cross-period trajectory prompt
 ├── utils/
 │   ├── document_loader.py   # PDF/text extraction
+│   ├── html_export.py       # Self-contained HTML rendering (escape-safe)
 │   ├── report_writer.py     # Markdown report output
 │   ├── score_parser.py      # Extract SCORE/RATING lines from finished reports
 │   ├── sector_stats.py      # Aggregate statistics across a batch
@@ -276,7 +290,8 @@ Each report includes an **Agent Breakdown** table with per-agent token usage and
 - ✅ **Week 4** — peer comparison (`--peers`): rank companies in the same sector on the composite scorecard with a top pick / avoid verdict
 - ✅ **Week 5** — watchlist (`--watch` / `--show-watchlist`): persistent score history with composite-move and governance-change alerts
 - ✅ **Week 6** — batch mode (`--batch`): screen a directory of filings with aggregate sector statistics, resilient to bad files
-- 🗓️ **Week 7** — HTML export: render reports and the sector screen as a styled, shareable page
+- ✅ **Week 7** — HTML export (`--html` / `--export-html`): self-contained, styled, escape-safe report pages
+- 🗓️ **Week 8** — scheduled runs: watch an input directory and analyze new filings as they land
 
 ## License
 
