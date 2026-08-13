@@ -1,0 +1,130 @@
+MERIDIAN PACIFIC HOLDINGS LIMITED
+(Incorporated in the Cayman Islands with limited liability)
+Stock Code: 1288.HK — Main Board, The Stock Exchange of Hong Kong Limited
+ANNUAL REPORT — Financial Year Ended 31 December 2024
+Prepared under International Financial Reporting Standards (IFRS)
+Presentation currency: Hong Kong Dollars (HKD)
+
+--- CHAIRMAN'S STATEMENT (extract) ---
+
+Meridian Pacific operates cloud-based logistics software for freight forwarders
+across Greater China, Singapore, Malaysia and Vietnam. The Group serves 1,840
+enterprise customers, up from 1,610 in the prior year. Founder and Chairman
+Mr. Terence Lau controls 41.2% of issued shares through Meridian Pacific
+Investments Ltd (BVI). Free float is 38.9%. The Group joined the Hang Seng
+Composite SmallCap Index in September 2024.
+
+--- CONSOLIDATED INCOME STATEMENT (HKD millions) ---
+
+                                        FY2024    FY2023    FY2022
+Revenue                                  4,182     3,614     2,905
+  Subscription revenue                   3,096     2,530     1,858
+  Implementation and services            1,086     1,084     1,047
+Cost of revenue                         (1,798)   (1,590)   (1,336)
+Gross profit                             2,384     2,024     1,569
+  Gross margin                            57.0%     56.0%     54.0%
+Selling and marketing                     (912)     (795)     (668)
+Research and development                  (734)     (615)     (498)
+  of which capitalised                     188       102        41
+General and administrative                (409)     (356)     (301)
+Government grants (Shenzhen, Suzhou)         96        71         38
+Operating profit                            425       329       140
+  Operating margin                        10.2%      9.1%      4.8%
+Share-based compensation (in opex)          214       166       119
+Finance costs                              (61)      (44)      (39)
+Share of loss of associate                 (18)      (11)        —
+Profit before tax                          346       274       101
+Income tax                                 (72)      (58)      (21)
+Net profit attributable to shareholders    274       216        80
+
+Top five customers accounted for 24.1% of revenue (FY2023: 19.8%).
+Revenue by geography: Mainland China 58%, Singapore 17%, Malaysia 13%,
+Vietnam 8%, other 4%. Approximately 61% of revenue is denominated in RMB.
+The Group does not hedge RMB exposure. Management estimates constant-currency
+revenue growth of 17.4% versus reported growth of 15.7%.
+
+--- CONSOLIDATED BALANCE SHEET (HKD millions) ---
+
+                                        FY2024    FY2023
+Cash and cash equivalents                 1,942     1,655
+Restricted cash (PRC subsidiaries)          214       187
+Trade receivables                           988       702
+  Days sales outstanding                    86        71
+Contract assets                             311       240
+Inventories                                   —         —
+Total current assets                      3,455     2,784
+Intangible assets (capitalised R&D)         402       243
+Goodwill                                    588       588
+Right-of-use assets                         274       291
+Total assets                              5,392     4,617
+
+Trade and other payables                    706       624
+  Days payable outstanding                  143       143
+Contract liabilities (deferred revenue)   1,204       988
+Bank borrowings — current                   180       160
+Bank borrowings — non-current               620       700
+Lease liabilities                           281       298
+Total liabilities                         2,991     2,770
+Total equity                              2,401     1,847
+
+Bank borrowings of HKD 800m mature as follows: HKD 180m within one year,
+HKD 420m in years two to three, HKD 200m in years four to five. Borrowings
+carry a covenant requiring net debt / EBITDA below 3.0x; the ratio at year end
+was 0.4x. Mr. Terence Lau has pledged 6.8% of issued share capital as security
+for a personal facility (FY2023: 4.1%).
+
+Weighted average shares outstanding: 1,412m (FY2023: 1,388m).
+Outstanding share options and RSUs: 96m, representing 6.8% potential dilution.
+
+The Group operates its PRC business through a variable interest entity (VIE),
+Shenzhen Meridian Information Technology Co. Ltd, consolidated by contractual
+arrangement rather than equity ownership. The VIE contributed 54% of Group
+revenue. Related-party receivables from entities controlled by the Chairman
+totalled HKD 61m (FY2023: HKD 22m).
+
+--- CONSOLIDATED CASH FLOW STATEMENT (HKD millions) ---
+
+                                        FY2024    FY2023
+Net profit                                  274       216
+Depreciation and amortisation               318       276
+Share-based compensation                    214       166
+Changes in working capital                 (286)      (94)
+Net cash from operating activities          520       564
+  OCF / net profit                          1.9x      2.6x
+Purchase of property and equipment          (96)      (88)
+Capitalised development costs              (188)     (102)
+Acquisition of associate stake             (140)        —
+Net cash used in investing activities      (424)     (190)
+Dividends paid                              (82)      (69)
+Share buybacks                                —         —
+Net repayment of borrowings                 (60)      (40)
+Net cash used in financing activities      (142)     (109)
+Net increase in cash                        (46)       265
+
+The Board recommends a final dividend of HKD 0.058 per share, representing a
+payout ratio of 30% (FY2023: 32%). The Group has paid a dividend in each of
+the past six financial years.
+
+--- CORPORATE GOVERNANCE (extract) ---
+
+The Board comprises eight directors: three executive, two non-executive and
+three independent non-executive directors. The Audit Committee consists of
+three independent non-executive directors and is chaired by Ms. Priya
+Raghunathan, a qualified accountant. The auditor is a Big Four firm and issued
+an unqualified opinion. The roles of Chairman and Chief Executive are held by
+the same individual, Mr. Terence Lau, a deviation from code provision C.2.1,
+which the Board considers appropriate given the Group's stage of development.
+
+Executive remuneration comprises base salary, an annual cash bonus tied to
+revenue and operating profit targets, and share awards vesting over four years.
+No director has a service contract exceeding three years.
+
+During the year the Group acquired a 24% stake in Kingsway Freight Analytics
+for HKD 140m. Kingsway is 15% owned by a family trust of which Mr. Terence Lau
+is a discretionary beneficiary. The transaction was approved by independent
+shareholders at an extraordinary general meeting.
+
+--- ESG (extract) ---
+
+The Group reports Scope 1 and Scope 2 emissions but does not disclose Scope 3.
+No third-party assurance was obtained for the ESG statement.

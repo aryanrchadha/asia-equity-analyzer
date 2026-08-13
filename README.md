@@ -257,7 +257,12 @@ asia-equity-analyzer/
 │   ├── score_parser.py      # Extract SCORE/RATING lines from finished reports
 │   ├── sector_stats.py      # Aggregate statistics across a batch
 │   └── watchlist.py         # Persistent score history + move alerts
+├── tests/                   # Stdlib test suite + live contract smoke test
+│   ├── support.py           # Stubs, fakes, report builders
+│   ├── smoke_live.py        # Live prompt-contract check (needs an API key)
+│   └── fixtures/            # Synthetic filing used by the smoke test
 ├── watchlist.json           # Score history (created on first --watch run)
+├── processed.json           # Analyzed-filing ledger (created by --watch-dir)
 ├── input/                   # Drop files here
 ├── output/                  # Reports appear here
 ├── .env                     # API key (gitignored)
@@ -265,6 +270,29 @@ asia-equity-analyzer/
 ├── requirements.txt
 └── README.md
 ```
+
+## Tests
+
+The suite uses only the standard library, so it runs with nothing installed and never touches the network:
+
+```bash
+python -m unittest discover tests
+```
+
+It covers the pipeline itself (driven through a fake API client: cache breakpoint placement, section ordering, usage aggregation, error handling), the score parser, both JSON state stores, HTML escaping, every CLI validation rule, and end-to-end runs of all five modes.
+
+### Live contract test
+
+The stubbed suite proves the parsers work; it cannot prove the **prompts produce what those parsers read**. Everything downstream — comparison deltas, peer ranking, sector statistics, watchlist alerts — depends on the specialists actually emitting `SCORE: X/N` and `RATING: X` lines. That needs a real API call:
+
+```bash
+python tests/smoke_live.py                   # ~4KB fixture filing, a few cents
+python tests/smoke_live.py --file real.pdf   # a filing of your own
+```
+
+It runs one filing through the real pipeline and checks the contract line by line: all ten sections present, every score parseable and in range, a governance rating from the allowed set, a composite that is actually consistent with the dimension scores it claims to weight, and a ranking table that renders without `n/a` cells. Exit codes: `0` contract holds, `1` violated (with the offending item named), `2` couldn't run (no key or SDK).
+
+Run this after any change to the prompts in `prompts/`. A violated contract doesn't crash anything — it silently degrades the aggregate tables to `n/a`, which is exactly the kind of failure worth a deliberate check.
 
 ## Cost Estimates
 
@@ -314,7 +342,8 @@ Each report includes an **Agent Breakdown** table with per-agent token usage and
 - ✅ **Week 6** — batch mode (`--batch`): screen a directory of filings with aggregate sector statistics, resilient to bad files
 - ✅ **Week 7** — HTML export (`--html` / `--export-html`): self-contained, styled, escape-safe report pages
 - ✅ **Week 8** — directory watch (`--watch-dir`): analyze filings as they land, with a content-hashed ledger so nothing is analyzed twice
-- 🗓️ **Week 9** — live smoke test against the API, then a regression suite pinned to real model output
+- ✅ **Week 9** — test suite (99 stdlib tests) plus `tests/smoke_live.py`, the live prompt-contract check
+- 🗓️ **Week 10** — run the live smoke test against a real filing and tune whichever prompts drift from the contract
 
 ## License
 

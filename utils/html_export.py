@@ -32,7 +32,9 @@ _HR = re.compile(r"^\s*(?:-{3,}|\*{3,}|_{3,})\s*$")
 _BULLET = re.compile(r"^(\s*)[-*+]\s+(.*)$")
 _ORDERED = re.compile(r"^(\s*)\d+[.)]\s+(.*)$")
 _QUOTE = re.compile(r"^>\s?(.*)$")
-_TABLE_DIVIDER = re.compile(r"^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$")
+# One dash is enough per GFM (`|:-:|` is a valid divider); requiring two
+# silently degraded compact tables into paragraphs.
+_TABLE_DIVIDER = re.compile(r"^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$")
 # Split on pipes that aren't backslash-escaped (report_writer escapes literal
 # pipes in filenames as \| so they don't split a row into extra cells).
 _UNESCAPED_PIPE = re.compile(r"(?<!\\)\|")
