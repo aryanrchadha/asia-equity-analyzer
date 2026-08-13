@@ -12,7 +12,7 @@ to analyze multiple filings of the same company and track score deltas, or
 --peers to rank multiple companies in the same sector, or --batch to screen a
 whole directory. Add --watch to record scores to the persistent watchlist and
 get alerted on material moves. Add --html to render each report as a
-self-contained HTML page.
+self-contained HTML page, or --watch-dir to analyze filings as they land.
 
 Usage:
     python main.py
@@ -24,6 +24,8 @@ Usage:
     python main.py --batch input/semis --batch-limit 10
     python main.py --batch input/semis --html
     python main.py --export-html output/tencent_2026-08-12_140000.md
+    python main.py --watch-dir input/inbox --watch --html
+    python main.py --watch-dir input/inbox --once   # one pass, for cron
     python main.py --show-watchlist
 """
 
@@ -39,11 +41,23 @@ from config import (
     MAX_TOKENS,
     MODEL,
     OUTPUT_TOKEN_COST_PER_MILLION,
+    LEDGER_PATH,
     TEMPERATURE,
+    WATCH_MAX_ATTEMPTS,
     WATCHLIST_ALERT_THRESHOLD,
     WATCHLIST_PATH,
+    WATCH_POLL_SECONDS,
 )
 from utils.document_loader import find_documents, load_document
+from utils.file_ledger import (
+    LedgerError,
+    load_ledger,
+    ledger_summary,
+    mark_analyzed,
+    mark_failed,
+    pending_files,
+    save_ledger,
+)
 from utils.html_export import export_markdown_file
 from utils.report_writer import (
     sanitize_filename,
@@ -139,6 +153,31 @@ def parse_args() -> argparse.Namespace:
         "listed in the report, never silently omitted.",
     )
     parser.add_argument(
+        "--watch-dir",
+        metavar="DIR",
+        default=None,
+        help="Watch a directory and analyze each new filing as it lands. "
+        "Runs until interrupted unless --once is given.",
+    )
+    parser.add_argument(
+        "--once",
+        action="store_true",
+        help="With --watch-dir, make a single pass and exit (for cron/systemd).",
+    )
+    parser.add_argument(
+        "--poll-interval",
+        type=float,
+        metavar="SECONDS",
+        default=WATCH_POLL_SECONDS,
+        help="With --watch-dir, seconds between directory scans.",
+    )
+    parser.add_argument(
+        "--ledger-path",
+        metavar="PATH",
+        default=LEDGER_PATH,
+        help="Path to the JSON record of which filings have been analyzed.",
+    )
+    parser.add_argument(
         "--html",
         action="store_true",
         help="Also render every report this run produces as a self-contained "
@@ -192,7 +231,8 @@ def parse_args() -> argparse.Namespace:
     group_modes = [
         name
         for name, value in (
-            ("--compare", args.compare), ("--peers", args.peers), ("--batch", args.batch)
+            ("--compare", args.compare), ("--peers", args.peers),
+            ("--batch", args.batch), ("--watch-dir", args.watch_dir),
         )
         if value
     ]
@@ -203,6 +243,20 @@ def parse_args() -> argparse.Namespace:
             parser.error("--batch uses the multi-agent pipeline; drop --single.")
         if args.file:
             parser.error("--batch scans a directory; drop --file.")
+    if args.watch_dir:
+        if args.single:
+            parser.error("--watch-dir uses the multi-agent pipeline; drop --single.")
+        if args.file:
+            parser.error("--watch-dir scans a directory; drop --file.")
+        if args.watch:
+            parser.error(
+                "--watch-dir analyzes whatever lands; each filing is named from "
+                "its filename. Use --watch without a company name."
+            )
+        if args.poll_interval <= 0:
+            parser.error("--poll-interval must be positive.")
+    elif args.once:
+        parser.error("--once only applies to --watch-dir.")
     if args.batch_limit is not None:
         if not args.batch:
             parser.error("--batch-limit only applies to --batch.")
@@ -212,6 +266,7 @@ def parse_args() -> argparse.Namespace:
         args.compare
         or args.peers
         or args.batch
+        or args.watch_dir
         or args.file
         or args.single
         or args.watch is not None
@@ -235,6 +290,7 @@ def parse_args() -> argparse.Namespace:
             for name, value in (
                 ("--compare", args.compare), ("--peers", args.peers),
                 ("--batch", args.batch), ("--file", args.file),
+                ("--watch-dir", args.watch_dir),
                 ("--html", args.html), ("--show-watchlist", args.show_watchlist),
                 ("--watch", args.watch is not None),
             )
@@ -460,6 +516,129 @@ def _record_watchlist(args, records: list) -> None:
         for alert in alerts:
             marker = "⚠️ " if alert.adverse else "✅"
             print(f"   {marker} {alert.company}: {alert.message}")
+    print()
+
+
+def _analyze_one(args, path: str) -> tuple:
+    """Analyze a single filing for watch mode.
+
+    Returns:
+        (filing, report_path) on success, or (None, reason) on failure.
+    """
+    doc_info = load_document(filepath=path)
+    if doc_info is None:
+        return None, "could not be loaded"
+
+    started = time.time()
+    try:
+        analysis = analyze_document_multi(doc_info.text, model=args.model)
+    except SystemExit:
+        # The pipeline exits on API failure; in watch mode that's one filing
+        # to retry later, not a reason to stop watching.
+        return None, "analysis failed"
+
+    report_path = _write_filing_report(
+        doc_info, analysis, time.time() - started, export_html=args.html
+    )
+    return make_filing_analysis(doc_info.filename, analysis, report_path), report_path
+
+
+def _watch_pass(args, ledger: dict) -> int:
+    """Analyze everything new in the watched directory. Returns files handled."""
+    paths = find_documents(args.watch_dir)
+    if paths is None:
+        return 0
+
+    pending, waiting, duplicates = pending_files(paths, ledger)
+    if waiting:
+        print(f"   ⏳ {len(waiting)} file(s) still being written; will retry.")
+    if duplicates:
+        names = ", ".join(os.path.basename(p) for p in duplicates)
+        print(f"   ⏭️  {len(duplicates)} duplicate(s) of filings in this pass: {names}")
+    if not pending:
+        return 0
+
+    print(f"📥 {len(pending)} new filing(s) detected.")
+    handled = 0
+    for path, digest in pending:
+        name = os.path.basename(path)
+        filing, outcome = _analyze_one(args, path)
+        if filing is None:
+            attempts = mark_failed(ledger, digest, name, outcome)
+            remaining = WATCH_MAX_ATTEMPTS - attempts
+            if remaining > 0:
+                print(f"   ⚠️  {name}: {outcome} (attempt {attempts}, will retry)")
+            else:
+                print(
+                    f"   ❌ {name}: {outcome} after {attempts} attempts — giving up "
+                    "on this file."
+                )
+        else:
+            mark_analyzed(ledger, digest, name, outcome)
+            handled += 1
+            if args.watch is not None:
+                _record_watchlist(
+                    args,
+                    [(filing.label, filing.filename, filing.report_path,
+                      filing.analysis.model, filing.scores)],
+                )
+        # Saved per file: a crash mid-pass must not lose the record of work
+        # already paid for, or the next pass would re-analyze and re-bill it.
+        try:
+            save_ledger(ledger, args.ledger_path)
+        except OSError as e:
+            print(f"   ⚠️  Could not write ledger '{args.ledger_path}': {e}")
+    return handled
+
+
+def run_watch_dir(args) -> None:
+    """Watch a directory and analyze filings as they land."""
+    try:
+        ledger = load_ledger(args.ledger_path)
+    except LedgerError as e:
+        print(f"❌ {e}")
+        print("   Refusing to continue: an unreadable ledger would re-analyze — and")
+        print("   re-bill — every filing in the directory. Fix or move the file.")
+        sys.exit(1)
+
+    analyzed, failed, _ = ledger_summary(ledger)
+    print()
+    print("=" * 60)
+    print("  📊 Asia Equity Analyzer — Directory Watch")
+    print(f"  {args.watch_dir}")
+    print("=" * 60)
+    print()
+    print(f"  Model:      {args.model}")
+    print(f"  Mode:       {'single pass' if args.once else 'continuous'}")
+    if not args.once:
+        print(f"  Poll:       every {args.poll_interval:g}s")
+    print(f"  Ledger:     {args.ledger_path} ({analyzed} analyzed, {failed} failed)")
+    print()
+    if not args.once:
+        print("  Press Ctrl-C to stop.")
+        print()
+
+    total = 0
+    try:
+        while True:
+            total += _watch_pass(args, ledger)
+            if args.once:
+                break
+            time.sleep(args.poll_interval)
+    except KeyboardInterrupt:
+        print("\n\n⏹️  Stopped.")
+
+    analyzed, failed, exhausted = ledger_summary(ledger)
+    print()
+    print("─" * 60)
+    print("  📋 WATCH SUMMARY")
+    print("─" * 60)
+    print(f"  Analyzed this run:  {total}")
+    print(f"  Ledger totals:      {analyzed} analyzed, {failed} failed")
+    if exhausted:
+        print(f"  Given up on:        {exhausted} file(s) past {WATCH_MAX_ATTEMPTS} attempts")
+    print(f"  Ledger:             {args.ledger_path}")
+    print("─" * 60)
     print()
 
 
@@ -734,6 +913,9 @@ def main():
         return
     if args.batch:
         run_batch(args)
+        return
+    if args.watch_dir:
+        run_watch_dir(args)
         return
 
     print()

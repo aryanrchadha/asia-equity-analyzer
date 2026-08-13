@@ -117,6 +117,26 @@ Files are analyzed in filename order (so runs are reproducible), each getting it
 
 Batch mode is built to survive a messy directory: a filing that can't be loaded or whose analysis fails is skipped, listed in a **Skipped Filings** section of the report, and named in the sector agent's own context so its conclusions acknowledge the gap. Filings dropped by `--batch-limit` are listed the same way — nothing is silently omitted. Three consecutive analysis failures stop the run, since that means the problem is your credentials or quota rather than the documents.
 
+### Directory Watch
+
+Point `--watch-dir` at a folder and each filing is analyzed as it lands:
+
+```bash
+python main.py --watch-dir input/inbox --watch --html   # runs until Ctrl-C
+python main.py --watch-dir input/inbox --once           # single pass, for cron
+```
+
+Use `--once` from cron or a systemd timer if you'd rather not keep a process running; the continuous mode polls every `--poll-interval` seconds (default 60) and stops cleanly on Ctrl-C.
+
+Which filings have been analyzed is tracked in `processed.json`, **keyed by a SHA-256 of file contents rather than by path**. That gets both directions right: re-downloading or renaming a filing you've already paid to analyze does nothing, while an amended filing that reuses its filename is correctly treated as new work.
+
+Two behaviours exist specifically to avoid wasting money:
+
+- **Files must settle before analysis.** A filing whose mtime is newer than `WATCH_SETTLE_SECONDS` (10s) is left alone until the next pass, so a PDF still being copied or downloaded isn't analyzed half-written into a garbage report at full cost.
+- **Failures retry, but not forever.** A failed filing is retried on later passes — transient rate limits and network blips shouldn't lose a filing — but after `WATCH_MAX_ATTEMPTS` (3) attempts it's given up on, so a permanently corrupt file can't bill you on every poll for the rest of the week.
+
+The ledger is written after **each** file, not at the end of a pass, so a crash can't lose the record of work already paid for. As with the watchlist, a `processed.json` that is malformed or has an unexpected schema version stops the run rather than being overwritten — silently starting from an empty ledger would re-analyze, and re-bill, the whole directory.
+
 ### HTML Export
 
 Add `--html` to any run to render each report it produces as a self-contained HTML page beside the markdown, or convert reports you already have:
@@ -230,12 +250,19 @@ asia-equity-analyzer/
 │   └── comparison.py          # Cross-period trajectory prompt
 ├── utils/
 │   ├── document_loader.py   # PDF/text extraction
+│   ├── file_ledger.py       # Which filings have been analyzed (content-hashed)
 │   ├── html_export.py       # Self-contained HTML rendering (escape-safe)
+│   ├── json_store.py        # Durable JSON state (atomic writes, no clobbering)
 │   ├── report_writer.py     # Markdown report output
 │   ├── score_parser.py      # Extract SCORE/RATING lines from finished reports
 │   ├── sector_stats.py      # Aggregate statistics across a batch
 │   └── watchlist.py         # Persistent score history + move alerts
+├── tests/                   # Stdlib test suite + live contract smoke test
+│   ├── support.py           # Stubs, fakes, report builders
+│   ├── smoke_live.py        # Live prompt-contract check (needs an API key)
+│   └── fixtures/            # Synthetic filing used by the smoke test
 ├── watchlist.json           # Score history (created on first --watch run)
+├── processed.json           # Analyzed-filing ledger (created by --watch-dir)
 ├── input/                   # Drop files here
 ├── output/                  # Reports appear here
 ├── .env                     # API key (gitignored)
@@ -243,6 +270,29 @@ asia-equity-analyzer/
 ├── requirements.txt
 └── README.md
 ```
+
+## Tests
+
+The suite uses only the standard library, so it runs with nothing installed and never touches the network:
+
+```bash
+python -m unittest discover tests
+```
+
+It covers the pipeline itself (driven through a fake API client: cache breakpoint placement, section ordering, usage aggregation, error handling), the score parser, both JSON state stores, HTML escaping, every CLI validation rule, and end-to-end runs of all five modes.
+
+### Live contract test
+
+The stubbed suite proves the parsers work; it cannot prove the **prompts produce what those parsers read**. Everything downstream — comparison deltas, peer ranking, sector statistics, watchlist alerts — depends on the specialists actually emitting `SCORE: X/N` and `RATING: X` lines. That needs a real API call:
+
+```bash
+python tests/smoke_live.py                   # ~4KB fixture filing, a few cents
+python tests/smoke_live.py --file real.pdf   # a filing of your own
+```
+
+It runs one filing through the real pipeline and checks the contract line by line: all ten sections present, every score parseable and in range, a governance rating from the allowed set, a composite that is actually consistent with the dimension scores it claims to weight, and a ranking table that renders without `n/a` cells. Exit codes: `0` contract holds, `1` violated (with the offending item named), `2` couldn't run (no key or SDK).
+
+Run this after any change to the prompts in `prompts/`. A violated contract doesn't crash anything — it silently degrades the aggregate tables to `n/a`, which is exactly the kind of failure worth a deliberate check.
 
 ## Cost Estimates
 
@@ -291,7 +341,9 @@ Each report includes an **Agent Breakdown** table with per-agent token usage and
 - ✅ **Week 5** — watchlist (`--watch` / `--show-watchlist`): persistent score history with composite-move and governance-change alerts
 - ✅ **Week 6** — batch mode (`--batch`): screen a directory of filings with aggregate sector statistics, resilient to bad files
 - ✅ **Week 7** — HTML export (`--html` / `--export-html`): self-contained, styled, escape-safe report pages
-- 🗓️ **Week 8** — scheduled runs: watch an input directory and analyze new filings as they land
+- ✅ **Week 8** — directory watch (`--watch-dir`): analyze filings as they land, with a content-hashed ledger so nothing is analyzed twice
+- ✅ **Week 9** — test suite (99 stdlib tests) plus `tests/smoke_live.py`, the live prompt-contract check
+- 🗓️ **Week 10** — run the live smoke test against a real filing and tune whichever prompts drift from the contract
 
 ## License
 

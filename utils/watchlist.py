@@ -10,13 +10,11 @@ into version control alongside the reports it references.
 
 from __future__ import annotations
 
-import json
-import os
-import tempfile
 from dataclasses import dataclass
 from datetime import datetime
 
 from config import WATCHLIST_ALERT_THRESHOLD, WATCHLIST_PATH
+from utils.json_store import StoreError, empty_store, load_store, save_store
 from utils.score_parser import GOVERNANCE_TO_NUMERIC, ScoreCard
 
 SCHEMA_VERSION = 1
@@ -26,8 +24,8 @@ SCHEMA_VERSION = 1
 ADVERSE_GOVERNANCE = {"CONCERNING", "RED FLAG"}
 
 
-class WatchlistError(RuntimeError):
-    """The watchlist file exists but could not be read as a valid store."""
+# The watchlist's own name for a malformed store; callers catch this.
+WatchlistError = StoreError
 
 
 @dataclass
@@ -41,50 +39,21 @@ class Alert:
 
 
 def empty_watchlist() -> dict:
-    return {"version": SCHEMA_VERSION, "companies": {}}
+    return empty_store("companies", SCHEMA_VERSION)
 
 
 def load_watchlist(path: str = WATCHLIST_PATH) -> dict:
     """Read the watchlist, returning an empty store if the file doesn't exist.
 
     Raises:
-        WatchlistError: If the file exists but isn't a valid watchlist. The
-            file is never overwritten in that case — a malformed store is a
-            problem to fix, not history to silently discard.
+        WatchlistError: If the file exists but isn't a valid watchlist.
     """
-    if not os.path.exists(path):
-        return empty_watchlist()
-
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-    except json.JSONDecodeError as e:
-        raise WatchlistError(f"'{path}' is not valid JSON: {e}") from e
-
-    if not isinstance(data, dict) or not isinstance(data.get("companies"), dict):
-        raise WatchlistError(f"'{path}' is not a watchlist file (no 'companies' map).")
-    version = data.get("version")
-    if version != SCHEMA_VERSION:
-        raise WatchlistError(
-            f"'{path}' has schema version {version!r}, expected {SCHEMA_VERSION}."
-        )
-    return data
+    return load_store(path, "companies", SCHEMA_VERSION)
 
 
 def save_watchlist(data: dict, path: str = WATCHLIST_PATH) -> None:
     """Write the watchlist atomically so an interrupted run can't corrupt it."""
-    directory = os.path.dirname(os.path.abspath(path))
-    os.makedirs(directory, exist_ok=True)
-    fd, temp_path = tempfile.mkstemp(dir=directory, suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2, ensure_ascii=False, sort_keys=True)
-            f.write("\n")
-        os.replace(temp_path, path)
-    except BaseException:
-        if os.path.exists(temp_path):
-            os.unlink(temp_path)
-        raise
+    save_store(data, path)
 
 
 def scores_to_dict(scores: ScoreCard) -> dict:
