@@ -279,6 +279,8 @@ The suite uses only the standard library, so it runs with nothing installed and 
 python -m unittest discover tests
 ```
 
+CI runs it on every push and pull request across Python 3.11–3.13, plus a second job that installs the real dependencies and checks the application imports and the CLI starts — a stubbed suite can't catch a genuinely broken dependency. That job also re-runs the tests with `pymupdf` present, which activates the real PDF-extraction cases the dependency-free job skips.
+
 It covers the pipeline itself (driven through a fake API client: cache breakpoint placement, section ordering, usage aggregation, error handling), the score parser, both JSON state stores, HTML escaping, every CLI validation rule, and end-to-end runs of all five modes.
 
 ### Live contract test
@@ -293,6 +295,8 @@ python tests/smoke_live.py --file real.pdf   # a filing of your own
 It runs one filing through the real pipeline and checks the contract line by line: all ten sections present, every score parseable and in range, a governance rating from the allowed set, a composite that is actually consistent with the dimension scores it claims to weight, and a ranking table that renders without `n/a` cells. Exit codes: `0` contract holds, `1` violated (with the offending item named), `2` couldn't run (no key or SDK).
 
 Run this after any change to the prompts in `prompts/`. A violated contract doesn't crash anything — it silently degrades the aggregate tables to `n/a`, which is exactly the kind of failure worth a deliberate check.
+
+It can also be run from GitHub: **Actions → Live contract smoke test → Run workflow**, once an `ANTHROPIC_API_KEY` repository secret exists. That workflow is manual-only — it spends money, so nothing triggers it automatically — and it uploads the generated report as an artifact whether or not the contract held, since a failed run is exactly when you want to read the report.
 
 ## Cost Estimates
 

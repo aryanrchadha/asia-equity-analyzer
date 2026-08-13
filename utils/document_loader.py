@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 
-import fitz  # pymupdf
+import pymupdf
 
 from config import INPUT_DIR, MAX_DOCUMENT_CHARS
 
@@ -85,7 +85,7 @@ def extract_text_from_pdf(filepath: str) -> tuple[str, int]:
     Returns:
         Tuple of (extracted_text, page_count).
     """
-    doc = fitz.open(filepath)
+    doc = pymupdf.open(filepath)
     try:
         page_count = len(doc)
         text_parts = []

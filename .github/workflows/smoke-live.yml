@@ -1,0 +1,63 @@
+name: Live contract smoke test
+
+# Manual only, and deliberately so: this makes real API calls and spends real
+# money. Nothing here runs on push or pull_request.
+on:
+  workflow_dispatch:
+    inputs:
+      model:
+        description: "Model ID (blank uses the configured default)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    name: Prompt contract against the live API
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Check the API key secret is configured
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          if [ -z "$ANTHROPIC_API_KEY" ]; then
+            echo "::error::No ANTHROPIC_API_KEY secret configured."
+            echo "Add one under Settings → Secrets and variables → Actions."
+            exit 1
+          fi
+
+      # Checks that the specialists actually emit the SCORE/RATING lines every
+      # aggregate feature parses. Exits 1 naming the offending item if not.
+      - name: Run the contract check
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          if [ -n "${{ inputs.model }}" ]; then
+            python tests/smoke_live.py --model "${{ inputs.model }}"
+          else
+            python tests/smoke_live.py
+          fi
+
+      # Uploaded whether or not the contract held — when it fails, the report
+      # is what tells you which prompt drifted.
+      - name: Upload the generated report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-report
+          path: output/
+          if-no-files-found: warn
+          retention-days: 14

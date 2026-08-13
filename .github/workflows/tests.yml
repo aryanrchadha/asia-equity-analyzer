@@ -1,0 +1,69 @@
+name: Tests
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+# A newer push to the same branch makes an in-flight run redundant.
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  unittest:
+    name: Test suite (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      # The suite stubs anthropic/pymupdf/dotenv and never touches the
+      # network, so it needs nothing installed. That keeps CI fast and means
+      # a dependency outage can't turn the tests red for unrelated reasons.
+      - name: Run tests
+        run: python -m unittest discover tests -v
+
+  imports:
+    name: Real dependencies resolve
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Byte-compile every module
+        run: python -m compileall -q main.py config.py agents prompts utils tests
+
+      # The test suite stubs the third-party packages, so it cannot catch a
+      # genuinely broken import of the real ones. Importing main pulls in the
+      # whole application against the actual installed dependencies.
+      - name: Import the application
+        run: python -c "import main; print('imports OK')"
+
+      - name: Check the CLI starts
+        run: python main.py --help > /dev/null
+
+      # With pymupdf actually installed, the suite additionally runs the real
+      # PDF-extraction tests it skips in the dependency-free job above.
+      - name: Run tests against the real dependencies
+        run: python -m unittest discover tests -v

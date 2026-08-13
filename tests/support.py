@@ -2,7 +2,7 @@
 
 Import this FIRST in every test module. Installing the stubs is an import-time
 side effect, so it has to happen before anything imports the app modules that
-pull in `anthropic`, `fitz`, or `dotenv`.
+pull in `anthropic`, `pymupdf`, or `dotenv`.
 """
 
 from __future__ import annotations
@@ -28,6 +28,12 @@ class _StubAPIError(Exception):
         self.status_code = status_code
 
 
+def has_real_pymupdf() -> bool:
+    """True when the real PDF library is installed (not our stub)."""
+    module = sys.modules.get("pymupdf")
+    return module is not None and hasattr(module, "open")
+
+
 def install_stubs() -> None:
     """Install stand-ins for the third-party packages the app imports.
 
@@ -42,8 +48,14 @@ def install_stubs() -> None:
         anthropic.APIStatusError = type("APIStatusError", (_StubAPIError,), {})
         sys.modules["anthropic"] = anthropic
 
-    if "fitz" not in sys.modules:
-        sys.modules["fitz"] = types.ModuleType("fitz")
+    # pymupdf is the one dependency worth using for real when it's present:
+    # PDF extraction is a code path stubs cannot exercise. Tests that need it
+    # are guarded with @unittest.skipUnless(REAL_PYMUPDF, ...).
+    if "pymupdf" not in sys.modules:
+        try:
+            import pymupdf  # noqa: F401
+        except ImportError:
+            sys.modules["pymupdf"] = types.ModuleType("pymupdf")
 
     if "dotenv" not in sys.modules:
         dotenv = types.ModuleType("dotenv")
