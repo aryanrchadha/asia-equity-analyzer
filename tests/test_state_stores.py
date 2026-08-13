@@ -77,6 +77,21 @@ class TestWatchlistAlerts(unittest.TestCase):
         assert format_watchlist_table(empty_watchlist()) == "_Watchlist is empty._"
 
 
+class TestWatchlistTableSafety(unittest.TestCase):
+    def test_company_name_with_a_pipe_keeps_the_table_aligned(self):
+        # Regression: --watch "acme|corp" injected an extra column separator.
+        import re
+
+        data = empty_watchlist()
+        record_analysis(data, "acme|corp", "f.pdf", "r.md", "m",
+                        ScoreCard(composite=4.0), recorded_at="t")
+        table = format_watchlist_table(data)
+        unescaped = re.compile(r"(?<!\\)\|")
+        header, row = table.splitlines()[0], table.splitlines()[2]
+        assert len(unescaped.split(header)) == len(unescaped.split(row))
+        assert r"acme\|corp" in row
+
+
 class TestLedgerIdentity(unittest.TestCase):
     def setUp(self):
         temp_workspace()

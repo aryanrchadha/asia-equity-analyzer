@@ -80,6 +80,42 @@ class TestPipeline(OrchestratorTest):
         assert caught.exception.code == 1
 
 
+class TestConcurrentOutput(OrchestratorTest):
+    """Specialists run in parallel, so their console output must not interleave."""
+
+    def test_each_specialist_emits_exactly_one_locked_write(self):
+        # Structural guarantee: one _log call per specialist, so there is no
+        # window between writing the text and writing the newline.
+        calls = []
+        real_log = orch._log
+        orch._log = calls.append
+        try:
+            with quiet():
+                self.run_pipeline()
+        finally:
+            orch._log = real_log
+        assert len(calls) == len(SPECIALISTS)
+        assert all(message.startswith("   ✅") for message in calls)
+
+    def test_truncation_warning_rides_the_same_write(self):
+        self.client.stop_reason = "max_tokens"
+        calls = []
+        real_log = orch._log
+        orch._log = calls.append
+        try:
+            with quiet():
+                self.run_pipeline()
+        finally:
+            orch._log = real_log
+        assert all("cut off" in message for message in calls)
+        assert all(message.count("\n") == 1 for message in calls)
+
+    # A timing-based test was tried here and deliberately removed: writes to
+    # an in-memory stream don't interleave the way a real one does, so it
+    # passed with the lock removed. The two structural tests above are the
+    # real protection — they fail if the output goes back to separate prints.
+
+
 class TestClientGuards(unittest.TestCase):
     def test_missing_key_exits_with_guidance(self):
         real = orch.ANTHROPIC_API_KEY

@@ -89,7 +89,7 @@ def analyze_document(
             "Consider increasing MAX_TOKENS in config.py or via --max-tokens."
         )
 
-    print(f"✅ Analysis complete.")
+    print("✅ Analysis complete.")
     print(f"   Input tokens:  {input_tokens:,}")
     print(f"   Output tokens: {output_tokens:,}")
     print(f"   Stop reason:   {stop_reason}")

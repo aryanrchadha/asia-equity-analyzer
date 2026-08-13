@@ -12,6 +12,7 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+import threading
 import time
 
 import anthropic
@@ -59,6 +60,18 @@ class MultiAnalysisResult:
     cache_read_tokens: int
     model: str
     sections: list = field(default_factory=list)
+
+
+# print() writes the text and the trailing newline as separate calls, so two
+# specialists finishing together can interleave into one garbled line. The
+# specialists run concurrently, so their console output is serialised here.
+_print_lock = threading.Lock()
+
+
+def _log(message: str) -> None:
+    """Write a whole message from a worker thread without interleaving."""
+    with _print_lock:
+        print(message)
 
 
 def make_client() -> anthropic.Anthropic:
@@ -152,15 +165,16 @@ def _run_specialist(
     cache_note = ""
     if result.cache_read_tokens:
         cache_note = f", cache read {result.cache_read_tokens:,}"
-    print(
+    lines = [
         f"   ✅ {spec.title} ({result.elapsed_seconds:.1f}s, "
         f"out {result.output_tokens:,}{cache_note})"
-    )
+    ]
     if result.truncated:
-        print(
+        lines.append(
             f"   ⚠️  {spec.title} was cut off at the {SPECIALIST_MAX_TOKENS:,}-token limit. "
             "Consider raising SPECIALIST_MAX_TOKENS in config.py."
         )
+    _log("\n".join(lines))
     return result
 
 

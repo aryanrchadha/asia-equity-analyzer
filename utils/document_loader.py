@@ -53,18 +53,25 @@ def get_most_recent_file() -> tuple[str, str] | None:
     return fpath, fname
 
 
-def find_documents(directory: str) -> list[str] | None:
+def find_documents(directory: str, verbose: bool = True) -> list[str] | None:
     """List every .pdf/.txt file in a directory, sorted by filename.
 
     Sorting by name (not mtime) keeps batch runs reproducible across
     machines and re-downloads.
+
+    Args:
+        directory: Directory to scan.
+        verbose: Whether to explain an empty or missing directory. Watch mode
+            passes False: an empty inbox is its normal steady state, not an
+            error, and saying so on every poll is just noise.
 
     Returns:
         Sorted list of filepaths, or None if the directory is missing or
         contains no supported files.
     """
     if not os.path.isdir(directory):
-        print(f"❌ Directory '{directory}' does not exist.")
+        if verbose:
+            print(f"❌ Directory '{directory}' does not exist.")
         return None
 
     paths = [
@@ -74,7 +81,8 @@ def find_documents(directory: str) -> list[str] | None:
         and os.path.isfile(os.path.join(directory, fname))
     ]
     if not paths:
-        print(f"❌ No .pdf or .txt files found in '{directory}'.")
+        if verbose:
+            print(f"❌ No .pdf or .txt files found in '{directory}'.")
         return None
     return paths
 

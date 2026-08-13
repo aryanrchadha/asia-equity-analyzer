@@ -10,15 +10,37 @@ from datetime import datetime
 from config import MAX_DOCUMENT_CHARS, MODEL, OUTPUT_DIR
 
 
+# Leaves room for the prefix ("comparison_"), timestamp, and extension inside
+# the 255-byte filename limit common to ext4, APFS, and NTFS.
+MAX_NAME_BYTES = 120
+
+
+def _truncate_to_bytes(name: str, limit: int) -> str:
+    """Trim to `limit` UTF-8 bytes without splitting a character."""
+    encoded = name.encode("utf-8")
+    if len(encoded) <= limit:
+        return name
+    return encoded[:limit].decode("utf-8", errors="ignore").rstrip("_")
+
+
 def sanitize_filename(name: str) -> str:
-    """Convert a source filename into a clean company name for the output file."""
+    """Convert a source filename into a clean company name for the output file.
+
+    Word characters are kept as-is rather than stripped to ASCII. This tool
+    covers Greater China, Korea and Southeast Asia, so CJK filenames are
+    routine — and reducing them to their digits made every "<company>2024.pdf"
+    collapse to "2024", which silently overwrote reports and merged unrelated
+    companies into one watchlist history.
+    """
     # Remove extension
     name = os.path.splitext(name)[0]
-    # Replace non-alphanumeric characters with underscores
-    name = re.sub(r"[^a-zA-Z0-9]+", "_", name)
+    # Replace anything that isn't a word character (unicode-aware) or digit
+    name = re.sub(r"[^\w]+", "_", name, flags=re.UNICODE)
     # Collapse multiple underscores and strip leading/trailing
     name = re.sub(r"_+", "_", name).strip("_")
-    return name.lower() or "report"
+    # Keep the whole path within the filesystem's limit; an over-long name
+    # would otherwise raise OSError after the analysis had already been paid for.
+    return _truncate_to_bytes(name.lower(), MAX_NAME_BYTES) or "report"
 
 
 def _escape_table_cell(text: str) -> str:

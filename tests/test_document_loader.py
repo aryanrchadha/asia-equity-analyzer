@@ -5,7 +5,6 @@ is only covered here — and only when the real package is installed.
 """
 
 import os
-import time
 import unittest
 
 from tests.support import has_real_pymupdf, install_stubs, quiet, temp_workspace

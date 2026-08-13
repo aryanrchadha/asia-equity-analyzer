@@ -321,6 +321,21 @@ def estimate_cost(
     )
 
 
+def _export_html_safely(report_path: str) -> None:
+    """Render a report to HTML, treating failure as cosmetic.
+
+    The analysis is already written and already paid for by this point, so a
+    full disk or a read-only output directory must not take it down with it —
+    least of all in an unattended watch loop, where the crash would also stop
+    the ledger recording work that has been billed.
+    """
+    try:
+        export_markdown_file(report_path)
+    except OSError as e:
+        print(f"   ⚠️  HTML export failed for '{report_path}': {e}")
+        print("      The markdown report is unaffected; re-run --export-html later.")
+
+
 def _multi_agent_stats(analysis) -> list:
     """Per-agent usage rows for the report's Agent Breakdown table."""
     return [
@@ -361,7 +376,7 @@ def _write_filing_report(
         agent_stats=_multi_agent_stats(analysis),
     )
     if export_html:
-        export_markdown_file(path)
+        _export_html_safely(path)
     return path
 
 
@@ -545,7 +560,9 @@ def _analyze_one(args, path: str) -> tuple:
 
 def _watch_pass(args, ledger: dict) -> int:
     """Analyze everything new in the watched directory. Returns files handled."""
-    paths = find_documents(args.watch_dir)
+    # Quiet: an empty inbox is the normal steady state for a watcher, and
+    # the directory itself was validated once at startup.
+    paths = find_documents(args.watch_dir, verbose=False)
     if paths is None:
         return 0
 
@@ -593,6 +610,10 @@ def _watch_pass(args, ledger: dict) -> int:
 
 def run_watch_dir(args) -> None:
     """Watch a directory and analyze filings as they land."""
+    if not os.path.isdir(args.watch_dir):
+        print(f"❌ Directory '{args.watch_dir}' does not exist.")
+        sys.exit(1)
+
     try:
         ledger = load_ledger(args.ledger_path)
     except LedgerError as e:
@@ -732,7 +753,7 @@ def run_comparison(args) -> None:
         pricing_uncertain=pricing_uncertain,
     )
     if args.html:
-        export_markdown_file(output_path)
+        _export_html_safely(output_path)
     _print_group_summary(
         "COMPARISON SUMMARY", "Period report:", filings, output_path,
         trajectory.model, usage, total_cost, elapsed,
@@ -786,7 +807,7 @@ def run_peers(args) -> None:
         pricing_uncertain=pricing_uncertain,
     )
     if args.html:
-        export_markdown_file(output_path)
+        _export_html_safely(output_path)
     _print_group_summary(
         "PEER SUMMARY", "Company report:", ranked, output_path,
         peer_analysis.model, usage, total_cost, elapsed,
@@ -875,7 +896,7 @@ def run_batch(args) -> None:
         pricing_uncertain=pricing_uncertain,
     )
     if args.html:
-        export_markdown_file(output_path)
+        _export_html_safely(output_path)
     _print_group_summary(
         "SECTOR SUMMARY", "Company report:", ranked, output_path,
         sector.model, usage, total_cost, elapsed,
@@ -1011,7 +1032,7 @@ def main():
     print()
 
     if args.html:
-        export_markdown_file(output_path)
+        _export_html_safely(output_path)
         print()
 
     # Step 5: Watchlist
