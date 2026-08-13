@@ -117,6 +117,26 @@ Files are analyzed in filename order (so runs are reproducible), each getting it
 
 Batch mode is built to survive a messy directory: a filing that can't be loaded or whose analysis fails is skipped, listed in a **Skipped Filings** section of the report, and named in the sector agent's own context so its conclusions acknowledge the gap. Filings dropped by `--batch-limit` are listed the same way — nothing is silently omitted. Three consecutive analysis failures stop the run, since that means the problem is your credentials or quota rather than the documents.
 
+### Directory Watch
+
+Point `--watch-dir` at a folder and each filing is analyzed as it lands:
+
+```bash
+python main.py --watch-dir input/inbox --watch --html   # runs until Ctrl-C
+python main.py --watch-dir input/inbox --once           # single pass, for cron
+```
+
+Use `--once` from cron or a systemd timer if you'd rather not keep a process running; the continuous mode polls every `--poll-interval` seconds (default 60) and stops cleanly on Ctrl-C.
+
+Which filings have been analyzed is tracked in `processed.json`, **keyed by a SHA-256 of file contents rather than by path**. That gets both directions right: re-downloading or renaming a filing you've already paid to analyze does nothing, while an amended filing that reuses its filename is correctly treated as new work.
+
+Two behaviours exist specifically to avoid wasting money:
+
+- **Files must settle before analysis.** A filing whose mtime is newer than `WATCH_SETTLE_SECONDS` (10s) is left alone until the next pass, so a PDF still being copied or downloaded isn't analyzed half-written into a garbage report at full cost.
+- **Failures retry, but not forever.** A failed filing is retried on later passes — transient rate limits and network blips shouldn't lose a filing — but after `WATCH_MAX_ATTEMPTS` (3) attempts it's given up on, so a permanently corrupt file can't bill you on every poll for the rest of the week.
+
+The ledger is written after **each** file, not at the end of a pass, so a crash can't lose the record of work already paid for. As with the watchlist, a `processed.json` that is malformed or has an unexpected schema version stops the run rather than being overwritten — silently starting from an empty ledger would re-analyze, and re-bill, the whole directory.
+
 ### HTML Export
 
 Add `--html` to any run to render each report it produces as a self-contained HTML page beside the markdown, or convert reports you already have:
@@ -230,7 +250,9 @@ asia-equity-analyzer/
 │   └── comparison.py          # Cross-period trajectory prompt
 ├── utils/
 │   ├── document_loader.py   # PDF/text extraction
+│   ├── file_ledger.py       # Which filings have been analyzed (content-hashed)
 │   ├── html_export.py       # Self-contained HTML rendering (escape-safe)
+│   ├── json_store.py        # Durable JSON state (atomic writes, no clobbering)
 │   ├── report_writer.py     # Markdown report output
 │   ├── score_parser.py      # Extract SCORE/RATING lines from finished reports
 │   ├── sector_stats.py      # Aggregate statistics across a batch
@@ -291,7 +313,8 @@ Each report includes an **Agent Breakdown** table with per-agent token usage and
 - ✅ **Week 5** — watchlist (`--watch` / `--show-watchlist`): persistent score history with composite-move and governance-change alerts
 - ✅ **Week 6** — batch mode (`--batch`): screen a directory of filings with aggregate sector statistics, resilient to bad files
 - ✅ **Week 7** — HTML export (`--html` / `--export-html`): self-contained, styled, escape-safe report pages
-- 🗓️ **Week 8** — scheduled runs: watch an input directory and analyze new filings as they land
+- ✅ **Week 8** — directory watch (`--watch-dir`): analyze filings as they land, with a content-hashed ledger so nothing is analyzed twice
+- 🗓️ **Week 9** — live smoke test against the API, then a regression suite pinned to real model output
 
 ## License
 
