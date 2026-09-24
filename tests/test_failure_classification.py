@@ -44,6 +44,15 @@ class TestClassification(unittest.TestCase):
                       anthropic.APIStatusError("server", status_code=500)):
             assert classify(error).systemic, error
 
+    def test_only_errors_a_restart_can_fix_need_one(self):
+        for status in (401, 403, 404):
+            assert classify(anthropic.APIStatusError("x", status_code=status)).needs_restart
+        for error in (anthropic.APIConnectionError("down"),
+                      anthropic.RateLimitError("429", status_code=429),
+                      anthropic.APIStatusError("overloaded", status_code=529),
+                      anthropic.APIStatusError("too long", status_code=400)):
+            assert not classify(error).needs_restart, error
+
     def test_a_bad_request_is_blamed_on_the_filing(self):
         # A 400 is typically an oversized or malformed document.
         assert not classify(anthropic.APIStatusError("too long", status_code=400)).systemic
@@ -57,6 +66,7 @@ class TestClassification(unittest.TestCase):
         finally:
             orch.ANTHROPIC_API_KEY = real
         assert caught.exception.systemic and caught.exception.code == 1
+        assert caught.exception.needs_restart
 
 
 class TestWatchModeFailures(ModeTest):
@@ -91,6 +101,40 @@ class TestWatchModeFailures(ModeTest):
         main.analyze_document_multi = self.working_pipeline
         out = self.run_cli(*self.ARGS)
         assert "Analyzed this run:  2" in out
+
+    def run_continuous(self, max_sleeps=3):
+        """Run the watcher until it exits or has slept `max_sleeps` times."""
+        slept = []
+
+        def fake_sleep(seconds):
+            slept.append(seconds)
+            if len(slept) >= max_sleeps:
+                raise KeyboardInterrupt
+
+        real_sleep = main.time.sleep
+        main.time.sleep = fake_sleep
+        try:
+            out = self.run_cli("--watch-dir", "filings", "--poll-interval", "1",
+                               "--ledger-path", "l.json")
+        finally:
+            main.time.sleep = real_sleep
+        return out, slept
+
+    def test_a_rejected_key_stops_the_watcher(self):
+        # Regression: the key is read at startup, so a 401 can't clear up
+        # mid-run — yet the watcher logged the same 401 on every poll, forever.
+        self.fail_with(PipelineError("API error 401", systemic=True, needs_restart=True))
+        with self.assertRaises(SystemExit) as caught:
+            self.run_continuous()
+        assert caught.exception.code == 1
+        assert len(self.analyses) == 1, "should stop at the first rejection"
+        assert self.ledger() == {}
+
+    def test_a_transient_outage_keeps_the_watcher_polling(self):
+        self.fail_with(PipelineError("API error 529", systemic=True))
+        out, slept = self.run_continuous()
+        assert len(slept) == 3 and len(self.analyses) == 3
+        assert "Stopped." in out and self.ledger() == {}
 
     def test_file_specific_failure_still_counts(self):
         self.fail_with(PipelineError("API error 400", systemic=False))

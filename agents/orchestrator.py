@@ -99,10 +99,14 @@ class PipelineError(SystemExit):
     the inbox over a configuration mistake.
     """
 
-    def __init__(self, reason: str, systemic: bool):
+    def __init__(self, reason: str, systemic: bool, needs_restart: bool = False):
         super().__init__(1)
         self.reason = reason
         self.systemic = systemic
+        # The key and model are read once at startup, so a missing or rejected
+        # key or an unknown model won't clear up while the process runs —
+        # unlike a rate limit or outage, retrying later can't help.
+        self.needs_restart = needs_restart
 
 
 # Statuses that would fail for any filing: credentials (401/403), an unknown
@@ -110,6 +114,7 @@ class PipelineError(SystemExit):
 # Anything else — typically a 400 for an oversized or malformed request — is
 # attributed to the filing.
 _SYSTEMIC_STATUSES = {401, 403, 404, 408, 429}
+_RESTART_STATUSES = {401, 403, 404}
 
 
 def has_credentials() -> bool:
@@ -120,7 +125,7 @@ def make_client() -> anthropic.Anthropic:
     """Build the API client, exiting with guidance if the key is missing."""
     if not has_credentials():
         print("❌ ANTHROPIC_API_KEY is not set. Add it to your .env file.")
-        raise PipelineError("no API key configured", systemic=True)
+        raise PipelineError("no API key configured", systemic=True, needs_restart=True)
     return anthropic.Anthropic(api_key=ANTHROPIC_API_KEY, timeout=REQUEST_TIMEOUT)
 
 
@@ -138,7 +143,11 @@ def api_errors():
     except anthropic.APIStatusError as e:
         print(f"❌ API error (status {e.status_code}): {e.message}")
         systemic = e.status_code >= 500 or e.status_code in _SYSTEMIC_STATUSES
-        raise PipelineError(f"API error {e.status_code}", systemic=systemic)
+        raise PipelineError(
+            f"API error {e.status_code}",
+            systemic=systemic,
+            needs_restart=e.status_code in _RESTART_STATUSES,
+        )
 
 
 def _build_system(document_text: str) -> list:

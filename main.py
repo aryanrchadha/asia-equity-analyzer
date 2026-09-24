@@ -556,30 +556,37 @@ def _analyze_one(args, path: str) -> tuple:
     """Analyze a single filing for watch mode.
 
     Returns:
-        (filing, report_path, False) on success, or (None, reason, systemic)
-        on failure — `systemic` meaning it would have failed for any filing.
+        (filing, report_path, None) on success, (None, reason, None) when the
+        filing itself failed, or (None, reason, error) when the PipelineError
+        `error` would have failed any filing.
     """
     doc_info = load_document(filepath=path)
     if doc_info is None:
-        return None, "could not be loaded", False
+        return None, "could not be loaded", None
 
     started = time.time()
     try:
         analysis = analyze_document_multi(doc_info.text, model=args.model)
     except PipelineError as e:
-        return None, e.reason, e.systemic
+        return None, e.reason, e if e.systemic else None
     except SystemExit:
-        return None, "analysis failed", False
+        return None, "analysis failed", None
 
     report_path = _write_filing_report(
         doc_info, analysis, time.time() - started, export_html=args.html
     )
     filing = make_filing_analysis(doc_info.filename, analysis, report_path)
-    return filing, report_path, False
+    return filing, report_path, None
 
 
 def _watch_pass(args, ledger: dict) -> int:
-    """Analyze everything new in the watched directory. Returns files handled."""
+    """Analyze everything new in the watched directory. Returns files handled.
+
+    Raises:
+        PipelineError: When the failure needs a restart to fix (a rejected
+            key, an unknown model), so the watcher stops instead of logging
+            the same error on every poll.
+    """
     # Quiet: an empty inbox is the normal steady state for a watcher, and
     # the directory itself was validated once at startup.
     paths = find_documents(args.watch_dir, verbose=False)
@@ -600,7 +607,9 @@ def _watch_pass(args, ledger: dict) -> int:
     for path, digest in pending:
         name = os.path.basename(path)
         filing, outcome, systemic = _analyze_one(args, path)
-        if filing is None and systemic:
+        if systemic is not None and systemic.needs_restart:
+            raise systemic
+        if systemic is not None:
             # Nothing about this filing caused it, and the rest of the queue
             # would fail the same way. Counting it would, over a few passes,
             # permanently abandon every filing because of one config mistake.
@@ -679,6 +688,7 @@ def run_watch_dir(args) -> None:
         print()
 
     total = 0
+    stopped_on = None
     try:
         while True:
             total += _watch_pass(args, ledger)
@@ -687,6 +697,13 @@ def run_watch_dir(args) -> None:
             time.sleep(args.poll_interval)
     except KeyboardInterrupt:
         print("\n\n⏹️  Stopped.")
+    except PipelineError as e:
+        stopped_on = e
+        print(
+            f"\n🛑 Stopping the watcher: {e.reason}. The API key and model are read "
+            "at startup, so this won't clear up on its own — fix it and restart."
+        )
+        print("   Nothing was counted against the filings.")
 
     analyzed, failed, exhausted = ledger_summary(ledger)
     print()
@@ -700,6 +717,8 @@ def run_watch_dir(args) -> None:
     print(f"  Ledger:             {args.ledger_path}")
     print("─" * 60)
     print()
+    if stopped_on is not None:
+        sys.exit(1)
 
 
 def run_export_html(args) -> None:
