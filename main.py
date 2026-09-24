@@ -59,6 +59,7 @@ from utils.file_ledger import (
     save_ledger,
 )
 from utils.html_export import export_markdown_file
+from utils.models import pricing_for
 from utils.report_writer import (
     sanitize_filename,
     write_batch_report,
@@ -311,14 +312,31 @@ def estimate_cost(
     output_tokens: int,
     cache_creation_tokens: int = 0,
     cache_read_tokens: int = 0,
+    model: str | None = None,
 ) -> float:
-    """Estimate the API cost in USD, including prompt-cache writes and reads."""
-    return (
-        (input_tokens / 1_000_000) * INPUT_TOKEN_COST_PER_MILLION
-        + (output_tokens / 1_000_000) * OUTPUT_TOKEN_COST_PER_MILLION
-        + (cache_creation_tokens / 1_000_000) * CACHE_WRITE_COST_PER_MILLION
-        + (cache_read_tokens / 1_000_000) * CACHE_READ_COST_PER_MILLION
+    """Estimate the API cost in USD, including prompt-cache writes and reads.
+
+    Uses the model's published pricing when it's in utils/models.py, and the
+    config constants otherwise (see pricing_known()).
+    """
+    input_rate, output_rate, known = pricing_for(
+        model, (INPUT_TOKEN_COST_PER_MILLION, OUTPUT_TOKEN_COST_PER_MILLION)
     )
+    if known:
+        write_rate, read_rate = input_rate * 1.25, input_rate * 0.10
+    else:
+        write_rate, read_rate = CACHE_WRITE_COST_PER_MILLION, CACHE_READ_COST_PER_MILLION
+    return (
+        (input_tokens / 1_000_000) * input_rate
+        + (output_tokens / 1_000_000) * output_rate
+        + (cache_creation_tokens / 1_000_000) * write_rate
+        + (cache_read_tokens / 1_000_000) * read_rate
+    )
+
+
+def pricing_known(model: str | None) -> bool:
+    """False when the cost estimate had to fall back to the config constants."""
+    return pricing_for(model, (0.0, 0.0))[2]
 
 
 def _export_html_safely(report_path: str) -> None:
@@ -358,6 +376,7 @@ def _write_filing_report(
         analysis.output_tokens,
         analysis.cache_creation_tokens,
         analysis.cache_read_tokens,
+        model=analysis.model,
     )
     path = write_report(
         analysis_text=analysis.text,
@@ -370,10 +389,11 @@ def _write_filing_report(
         original_chars=doc_info.original_chars,
         was_truncated=doc_info.was_truncated,
         model=analysis.model,
-        pricing_uncertain=analysis.model != MODEL,
+        pricing_uncertain=not pricing_known(analysis.model),
         cache_creation_tokens=analysis.cache_creation_tokens,
         cache_read_tokens=analysis.cache_read_tokens,
         agent_stats=_multi_agent_stats(analysis),
+        incomplete_sections=analysis.incomplete_sections,
     )
     if export_html:
         _export_html_safely(path)
@@ -709,11 +729,11 @@ def run_show_watchlist(args) -> None:
 
 
 def _warn_pricing(final_call) -> bool:
-    pricing_uncertain = final_call.model != MODEL
+    pricing_uncertain = not pricing_known(final_call.model)
     if pricing_uncertain:
         print(
-            f"⚠️  Cost estimate uses {MODEL} pricing but the responses came from "
-            f"{final_call.model}. The estimate may not reflect actual billed cost."
+            f"⚠️  No published pricing on file for {final_call.model}; the cost "
+            "estimate uses the config constants and may not match the bill."
         )
     return pricing_uncertain
 
@@ -736,7 +756,7 @@ def run_comparison(args) -> None:
     elapsed = time.time() - start_time
 
     usage = _aggregate_usage(filings, trajectory)
-    total_cost = estimate_cost(*usage)
+    total_cost = estimate_cost(*usage, model=trajectory.model)
     pricing_uncertain = _warn_pricing(trajectory)
 
     output_path = write_comparison_report(
@@ -790,7 +810,7 @@ def run_peers(args) -> None:
     elapsed = time.time() - start_time
 
     usage = _aggregate_usage(filings, peer_analysis)
-    total_cost = estimate_cost(*usage)
+    total_cost = estimate_cost(*usage, model=peer_analysis.model)
     pricing_uncertain = _warn_pricing(peer_analysis)
 
     output_path = write_peer_report(
@@ -876,7 +896,7 @@ def run_batch(args) -> None:
     elapsed = time.time() - start_time
 
     usage = _aggregate_usage(filings, sector)
-    total_cost = estimate_cost(*usage)
+    total_cost = estimate_cost(*usage, model=sector.model)
     pricing_uncertain = _warn_pricing(sector)
 
     output_path = write_batch_report(
@@ -979,15 +999,10 @@ def main():
 
     # Step 3: Write report
     cost = estimate_cost(
-        analysis.input_tokens, analysis.output_tokens, cache_creation, cache_read
+        analysis.input_tokens, analysis.output_tokens, cache_creation, cache_read,
+        model=analysis.model,
     )
-    pricing_uncertain = analysis.model != MODEL
-    if pricing_uncertain:
-        print(
-            f"⚠️  Cost estimate uses {MODEL} pricing (${INPUT_TOKEN_COST_PER_MILLION}/M in, "
-            f"${OUTPUT_TOKEN_COST_PER_MILLION}/M out) but the response came from {analysis.model}. "
-            "The estimate below may not reflect actual billed cost."
-        )
+    pricing_uncertain = _warn_pricing(analysis)
     output_path = write_report(
         analysis_text=analysis.text,
         source_filename=doc_info.filename,
@@ -1003,6 +1018,7 @@ def main():
         cache_creation_tokens=cache_creation,
         cache_read_tokens=cache_read,
         agent_stats=agent_stats,
+        incomplete_sections=analysis.incomplete_sections,
     )
 
     # Step 4: Summary

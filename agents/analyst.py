@@ -1,11 +1,14 @@
 """Financial analyst agent: sends document text to Claude for analysis."""
 
+from __future__ import annotations
+
 from dataclasses import dataclass
 
 import anthropic
 
 from config import ANTHROPIC_API_KEY, MAX_TOKENS, MODEL, REQUEST_TIMEOUT, TEMPERATURE
 from prompts.financial_analysis import FINANCIAL_ANALYSIS_PROMPT
+from utils.models import request_params, temperature_ignored
 
 
 @dataclass
@@ -16,6 +19,16 @@ class AnalysisResult:
     input_tokens: int
     output_tokens: int
     model: str
+    stop_reason: str | None = None
+
+    @property
+    def incomplete_sections(self) -> list[tuple[str, str]]:
+        """Same shape as MultiAnalysisResult.incomplete_sections."""
+        if self.stop_reason == "refusal":
+            return [("Analyst", "declined by the model")]
+        if self.stop_reason == "max_tokens":
+            return [("Analyst", "cut off at the output-token limit")]
+        return []
 
 
 def analyze_document(
@@ -51,13 +64,15 @@ def analyze_document(
     print(f"🤖 Sending to {model}...")
     print(f"   Document length: {len(document_text):,} characters")
     print(f"   Max output tokens: {max_tokens:,}")
-    print(f"   Temperature: {TEMPERATURE}")
+    params = request_params(model, max_tokens, TEMPERATURE)
+    if params["max_tokens"] != max_tokens:
+        print(f"   Output budget raised to {params['max_tokens']:,} ({model} thinks by default)")
+    if temperature_ignored(model, TEMPERATURE):
+        print(f"   ℹ️  TEMPERATURE={TEMPERATURE} is not sent: {model} rejects sampling parameters.")
 
     try:
         response = client.messages.create(
-            model=model,
-            max_tokens=max_tokens,
-            temperature=TEMPERATURE,
+            **params,
             system=FINANCIAL_ANALYSIS_PROMPT,
             messages=[
                 {"role": "user", "content": user_message}
@@ -83,9 +98,17 @@ def analyze_document(
     output_tokens = response.usage.output_tokens
 
     stop_reason = response.stop_reason
-    if stop_reason == "max_tokens":
+    if stop_reason == "refusal":
+        if not analysis_text.strip():
+            # Nothing to write: a report with only a stats table would look
+            # like a finished analysis.
+            print("❌ The model declined this request and produced no analysis.")
+            raise SystemExit(1)
+        print("⚠️  Warning: The model declined partway through; the analysis is incomplete.")
+    elif stop_reason == "max_tokens":
         print(
-            f"⚠️  Warning: Response was cut off at the max_tokens limit ({max_tokens:,}). "
+            f"⚠️  Warning: Response was cut off at the max_tokens limit "
+            f"({params['max_tokens']:,}). "
             "Consider increasing MAX_TOKENS in config.py or via --max-tokens."
         )
 
@@ -99,4 +122,5 @@ def analyze_document(
         input_tokens=input_tokens,
         output_tokens=output_tokens,
         model=response.model,
+        stop_reason=stop_reason,
     )

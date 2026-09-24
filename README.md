@@ -298,9 +298,19 @@ Run this after any change to the prompts in `prompts/`. A violated contract does
 
 It can also be run from GitHub: **Actions → Live contract smoke test → Run workflow**, once an `ANTHROPIC_API_KEY` repository secret exists. That workflow is manual-only — it spends money, so nothing triggers it automatically — and it uploads the generated report as an artifact whether or not the contract held, since a failed run is exactly when you want to read the report.
 
+## Choosing a Model
+
+`--model` accepts any Claude model ID. Request parameters are not uniform across models, so `utils/models.py` adapts each request to the model it's going to:
+
+- **Sampling parameters.** Opus 4.7 and later, Opus 5, Sonnet 5 and Fable 5 reject `temperature` with a 400. It is sent only when you've changed `TEMPERATURE` from the API default of 1.0 *and* the model accepts it; otherwise it's skipped with a notice. An unrecognised model never gets it.
+- **Thinking budget.** Opus 5, Sonnet 5 and Fable 5 think by default, and thinking shares `max_tokens` with the answer — a 4,000-token specialist budget that is ample elsewhere would truncate. Those models get 16,000.
+- **Pricing.** Cost estimates use each model's own published rates. A model not in the table falls back to the config constants, and the report says so rather than presenting a guess as the bill.
+
+If a model declines part of a request (`stop_reason: "refusal"`) or runs out of output tokens, the saved report opens with a warning naming the affected sections — a truncated analysis must not look finished once the console output is gone. If every agent declines, no report is written.
+
 ## Cost Estimates
 
-Using Claude Sonnet 4 pricing ($3/M input, $15/M output):
+Using Claude Sonnet 4.6 pricing ($3/M input, $15/M output); other models are priced at their own rates:
 
 | Report Size | Input Tokens | Output Tokens | Approx. Cost |
 |-------------|-------------|---------------|--------------|

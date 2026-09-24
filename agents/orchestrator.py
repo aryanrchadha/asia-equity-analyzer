@@ -25,6 +25,7 @@ from config import (
     SYNTHESIS_MAX_TOKENS,
     TEMPERATURE,
 )
+from utils.models import request_params, temperature_ignored
 from prompts.section_prompts import (
     BASE_ANALYST_CONTEXT,
     SPECIALISTS,
@@ -47,6 +48,8 @@ class SectionResult:
     model: str
     elapsed_seconds: float
     truncated: bool
+    # The model declined (stop_reason "refusal"); text is empty or partial.
+    refused: bool = False
 
 
 @dataclass
@@ -60,6 +63,17 @@ class MultiAnalysisResult:
     cache_read_tokens: int
     model: str
     sections: list = field(default_factory=list)
+
+    @property
+    def incomplete_sections(self) -> list[tuple[str, str]]:
+        """(agent title, reason) for every agent whose output is not whole."""
+        problems = []
+        for section in self.sections:
+            if section.refused:
+                problems.append((section.title, "declined by the model"))
+            elif section.truncated:
+                problems.append((section.title, "cut off at the output-token limit"))
+        return problems
 
 
 # print() writes the text and the trailing newline as separate calls, so two
@@ -123,9 +137,7 @@ def _call(
 ) -> SectionResult:
     start = time.time()
     response = client.messages.create(
-        model=model,
-        max_tokens=max_tokens,
-        temperature=TEMPERATURE,
+        **request_params(model, max_tokens, TEMPERATURE),
         system=system,
         messages=[{"role": "user", "content": user_content}],
     )
@@ -144,6 +156,7 @@ def _call(
         model=response.model,
         elapsed_seconds=elapsed,
         truncated=response.stop_reason == "max_tokens",
+        refused=response.stop_reason == "refusal",
     )
 
 
@@ -169,9 +182,14 @@ def _run_specialist(
         f"   ✅ {spec.title} ({result.elapsed_seconds:.1f}s, "
         f"out {result.output_tokens:,}{cache_note})"
     ]
-    if result.truncated:
+    if result.refused:
         lines.append(
-            f"   ⚠️  {spec.title} was cut off at the {SPECIALIST_MAX_TOKENS:,}-token limit. "
+            f"   ⚠️  {spec.title} was declined by the model; its section will be "
+            "missing from the report."
+        )
+    elif result.truncated:
+        lines.append(
+            f"   ⚠️  {spec.title} was cut off at the output-token limit. "
             "Consider raising SPECIALIST_MAX_TOKENS in config.py."
         )
     _log("\n".join(lines))
@@ -189,6 +207,8 @@ def analyze_document_multi(document_text: str, model: str = MODEL) -> MultiAnaly
 
     print(f"🤖 Running {len(SPECIALISTS)} specialist agents on {model}...")
     print(f"   Document length: {len(document_text):,} characters")
+    if temperature_ignored(model, TEMPERATURE):
+        print(f"   ℹ️  TEMPERATURE={TEMPERATURE} is not sent: {model} rejects sampling parameters.")
 
     sections: list[SectionResult] = []
     with api_errors():
@@ -221,14 +241,21 @@ def analyze_document_multi(document_text: str, model: str = MODEL) -> MultiAnaly
             "Synthesis (Tensions, Scorecard, Bottom Line)",
         )
         print(f"   ✅ {synthesis.title} ({synthesis.elapsed_seconds:.1f}s)")
-        if synthesis.truncated:
+        if synthesis.refused:
+            print("   ⚠️  Synthesis was declined by the model; sections 8-10 will be missing.")
+        elif synthesis.truncated:
             print(
-                f"   ⚠️  Synthesis was cut off at the {SYNTHESIS_MAX_TOKENS:,}-token limit. "
+                "   ⚠️  Synthesis was cut off at the output-token limit. "
                 "Consider raising SYNTHESIS_MAX_TOKENS in config.py."
             )
         sections.append(synthesis)
 
     combined_text = "\n\n".join(s.text for s in sections)
+    if not combined_text.strip():
+        # Every agent declined. A report containing only a stats table would
+        # read as a finished analysis, so write nothing and say why.
+        print("❌ The model declined every part of this analysis; no report written.")
+        raise SystemExit(1)
     return MultiAnalysisResult(
         text=combined_text,
         input_tokens=sum(s.input_tokens for s in sections),

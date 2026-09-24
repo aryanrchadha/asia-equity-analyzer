@@ -152,7 +152,8 @@ def main() -> int:
     from main import estimate_cost
 
     cost = estimate_cost(analysis.input_tokens, analysis.output_tokens,
-                         analysis.cache_creation_tokens, analysis.cache_read_tokens)
+                         analysis.cache_creation_tokens, analysis.cache_read_tokens,
+                         model=analysis.model)
     report_path = write_report(
         analysis_text=analysis.text,
         source_filename=f"SMOKE_{doc.filename}",

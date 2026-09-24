@@ -109,8 +109,11 @@ class FakeMessages:
             cache_creation=500 if first else 0,
             cache_read=0 if first else 500,
         )
+        stop_reason = self._client.stop_reason
+        if callable(stop_reason):
+            stop_reason = stop_reason(kwargs)
         return FakeResponse(text, model=self._client.model, usage=usage,
-                            stop_reason=self._client.stop_reason)
+                            stop_reason=stop_reason)
 
 
 class FakeAnthropic:

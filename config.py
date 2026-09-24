@@ -17,7 +17,10 @@ SPECIALIST_MAX_TOKENS = 4000   # per-specialist output cap
 SYNTHESIS_MAX_TOKENS = 5000    # synthesis agent output cap
 
 # API Request Parameters
-TEMPERATURE = 1.0       # Claude default; lower values (e.g. 0.3) reduce variance in scores
+# Only sent when changed from the API default (1.0) and only to models that
+# accept sampling parameters — Opus 4.7+, Opus 5, Sonnet 5 and Fable 5 reject
+# them with a 400, so for those it is skipped with a notice. See utils/models.py.
+TEMPERATURE = 1.0
 REQUEST_TIMEOUT = 600   # Seconds; large annual reports can take several minutes
 
 # Directory Configuration
