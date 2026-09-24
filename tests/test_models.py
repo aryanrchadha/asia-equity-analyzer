@@ -5,6 +5,7 @@ send temperature=1.0, which Opus 4.7+, Opus 5, and Fable 5 answer with a 400 —
 so even the usage example in main.py's own docstring failed on its first call.
 """
 
+import json
 import unittest
 
 from tests.support import FakeAnthropic, install_stubs, quiet
@@ -227,9 +228,11 @@ class TestIncompleteReports(unittest.TestCase):
         body = self.write(incomplete_sections=[("Margin Analysis", "declined by the model")])
         assert "This analysis is incomplete" in body
         assert "**Margin Analysis** — declined by the model" in body
-        import yaml
-        front = yaml.safe_load(body.split("---")[1])
-        assert front["incomplete_sections"] == ["Margin Analysis"]
+        # Stdlib only: the dependency-free CI job has no YAML parser. The
+        # writer emits this value as JSON, which is also valid YAML.
+        line = next(line for line in body.split("---")[1].splitlines()
+                    if line.startswith("incomplete_sections:"))
+        assert json.loads(line.split(":", 1)[1]) == ["Margin Analysis"]
 
     def test_complete_reports_carry_no_warning(self):
         body = self.write()
