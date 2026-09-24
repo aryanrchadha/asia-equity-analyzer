@@ -5,7 +5,17 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# API Configuration
+# Backend: where model calls go.
+#   "claude-code" (default) — runs each call through the Claude Code CLI
+#       (`claude -p`), drawing on your logged-in Claude plan's usage. Log in
+#       once with `claude`; no API key is needed or used.
+#   "api" — calls the Anthropic API directly, billed to ANTHROPIC_API_KEY.
+# Override per run with --backend, or set ANALYZER_BACKEND in .env.
+BACKEND = os.getenv("ANALYZER_BACKEND", "claude-code")
+BACKENDS = ("claude-code", "api")
+CLAUDE_CLI = os.getenv("CLAUDE_CLI", "claude")   # path to the Claude Code binary
+
+# API Configuration (only used by the "api" backend)
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 
 # Model Configuration
@@ -17,7 +27,10 @@ SPECIALIST_MAX_TOKENS = 4000   # per-specialist output cap
 SYNTHESIS_MAX_TOKENS = 5000    # synthesis agent output cap
 
 # API Request Parameters
-TEMPERATURE = 1.0       # Claude default; lower values (e.g. 0.3) reduce variance in scores
+# Only sent when changed from the API default (1.0) and only to models that
+# accept sampling parameters — Opus 4.7+, Opus 5, Sonnet 5 and Fable 5 reject
+# them with a 400, so for those it is skipped with a notice. See utils/models.py.
+TEMPERATURE = 1.0
 REQUEST_TIMEOUT = 600   # Seconds; large annual reports can take several minutes
 
 # Directory Configuration

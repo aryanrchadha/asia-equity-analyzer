@@ -30,17 +30,18 @@ Usage:
 """
 
 import argparse
+import contextlib
+import io
 import os
 import sys
 import time
+import unicodedata
 
 from config import (
-    CACHE_READ_COST_PER_MILLION,
-    CACHE_WRITE_COST_PER_MILLION,
-    INPUT_TOKEN_COST_PER_MILLION,
+    BACKEND,
+    BACKENDS,
     MAX_TOKENS,
     MODEL,
-    OUTPUT_TOKEN_COST_PER_MILLION,
     LEDGER_PATH,
     TEMPERATURE,
     WATCH_MAX_ATTEMPTS,
@@ -48,9 +49,11 @@ from config import (
     WATCHLIST_PATH,
     WATCH_POLL_SECONDS,
 )
+from utils.cost_preview import estimate_group_agent, estimate_pipeline, estimate_single
 from utils.document_loader import find_documents, load_document
 from utils.file_ledger import (
     LedgerError,
+    clear_failures,
     load_ledger,
     ledger_summary,
     mark_analyzed,
@@ -59,6 +62,9 @@ from utils.file_ledger import (
     save_ledger,
 )
 from utils.html_export import export_markdown_file
+# estimate_cost and pricing_known are re-exported here for callers
+# (and tests) that reach them through main.
+from utils.models import estimate_cost, pricing_known, profile_for  # noqa: F401
 from utils.report_writer import (
     sanitize_filename,
     write_batch_report,
@@ -85,7 +91,14 @@ from agents.comparator import (
     make_filing_analysis,
     rank_peers,
 )
-from agents.orchestrator import analyze_document_multi
+from agents.orchestrator import (
+    PipelineError,
+    analyze_document_multi,
+    credentials_help,
+    has_credentials,
+    set_backend,
+    uses_plan_usage,
+)
 
 # A run of back-to-back analysis failures in batch mode means something
 # systemic is wrong (credentials, quota, network) rather than one bad file.
@@ -172,10 +185,30 @@ def parse_args() -> argparse.Namespace:
         help="With --watch-dir, seconds between directory scans.",
     )
     parser.add_argument(
+        "--retry-failed",
+        action="store_true",
+        help="With --watch-dir, clear recorded failures first, so filings that "
+        "were given up on are attempted again.",
+    )
+    parser.add_argument(
         "--ledger-path",
         metavar="PATH",
         default=LEDGER_PATH,
         help="Path to the JSON record of which filings have been analyzed.",
+    )
+    parser.add_argument(
+        "--backend",
+        choices=BACKENDS,
+        default=BACKEND if BACKEND in BACKENDS else None,
+        help="Where model calls go: 'claude-code' (default) runs them through the "
+        "Claude Code CLI on your logged-in Claude plan; 'api' bills ANTHROPIC_API_KEY. "
+        "Default from ANALYZER_BACKEND.",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show which filings would be analyzed and what it would cost, then "
+        "exit. Extracts text locally; makes no API calls.",
     )
     parser.add_argument(
         "--html",
@@ -257,6 +290,8 @@ def parse_args() -> argparse.Namespace:
             parser.error("--poll-interval must be positive.")
     elif args.once:
         parser.error("--once only applies to --watch-dir.")
+    elif args.retry_failed:
+        parser.error("--retry-failed only applies to --watch-dir.")
     if args.batch_limit is not None:
         if not args.batch:
             parser.error("--batch-limit only applies to --batch.")
@@ -301,24 +336,26 @@ def parse_args() -> argparse.Namespace:
                 f"--export-html converts existing reports and exits; drop "
                 f"{', '.join(conflicting)}."
             )
+    if args.dry_run and (args.show_watchlist or args.export_html):
+        parser.error("--show-watchlist and --export-html make no API calls; --dry-run adds nothing.")
     if args.alert_threshold < 0:
         parser.error("--alert-threshold must be zero or positive.")
     return args
 
 
-def estimate_cost(
-    input_tokens: int,
-    output_tokens: int,
-    cache_creation_tokens: int = 0,
-    cache_read_tokens: int = 0,
-) -> float:
-    """Estimate the API cost in USD, including prompt-cache writes and reads."""
-    return (
-        (input_tokens / 1_000_000) * INPUT_TOKEN_COST_PER_MILLION
-        + (output_tokens / 1_000_000) * OUTPUT_TOKEN_COST_PER_MILLION
-        + (cache_creation_tokens / 1_000_000) * CACHE_WRITE_COST_PER_MILLION
-        + (cache_read_tokens / 1_000_000) * CACHE_READ_COST_PER_MILLION
-    )
+def _export_html_safely(report_path: str) -> None:
+    """Render a report to HTML, treating failure as cosmetic.
+
+    The analysis is already written and already paid for by this point, so a
+    full disk or a read-only output directory must not take it down with it —
+    least of all in an unattended watch loop, where the crash would also stop
+    the ledger recording work that has been billed.
+    """
+    try:
+        export_markdown_file(report_path)
+    except OSError as e:
+        print(f"   ⚠️  HTML export failed for '{report_path}': {e}")
+        print("      The markdown report is unaffected; re-run --export-html later.")
 
 
 def _multi_agent_stats(analysis) -> list:
@@ -343,6 +380,7 @@ def _write_filing_report(
         analysis.output_tokens,
         analysis.cache_creation_tokens,
         analysis.cache_read_tokens,
+        model=analysis.model,
     )
     path = write_report(
         analysis_text=analysis.text,
@@ -355,13 +393,14 @@ def _write_filing_report(
         original_chars=doc_info.original_chars,
         was_truncated=doc_info.was_truncated,
         model=analysis.model,
-        pricing_uncertain=analysis.model != MODEL,
+        pricing_uncertain=not pricing_known(analysis.model),
         cache_creation_tokens=analysis.cache_creation_tokens,
         cache_read_tokens=analysis.cache_read_tokens,
         agent_stats=_multi_agent_stats(analysis),
+        incomplete_sections=analysis.incomplete_sections,
     )
     if export_html:
-        export_markdown_file(path)
+        _export_html_safely(path)
     return path
 
 
@@ -401,13 +440,24 @@ def _analyze_filings(
         filing_start = time.time()
         try:
             analysis = analyze_document_multi(doc_info.text, model=model)
-        except SystemExit:
+        except SystemExit as e:
             # The pipeline exits on API failure; in batch mode that's one
-            # filing lost, not the whole run.
+            # filing lost, not the whole run — unless it's systemic.
             if not skip_failures:
                 raise
+            if getattr(e, "systemic", False):
+                print(
+                    f"❌ Stopping the batch: {e.reason}. That would fail for every "
+                    "filing, so the rest were not attempted."
+                )
+                skipped.append((doc_info.filename, e.reason))
+                skipped.extend(
+                    (d.filename, f"not attempted ({e.reason})") for d in documents[index:]
+                )
+                break
+            reason = getattr(e, "reason", "analysis failed")
             print(f"   ⏭️  Skipping '{doc_info.filename}' after the error above.\n")
-            skipped.append((doc_info.filename, "analysis failed"))
+            skipped.append((doc_info.filename, reason))
             consecutive_failures += 1
             if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
                 remaining = documents[index:]
@@ -468,10 +518,16 @@ def _print_group_summary(
     print(f"  Model:          {model}")
     total = input_tokens + cache_creation + cache_read + output_tokens
     print(f"  Total tokens:   {total:,}")
-    print(f"  Est. cost:      ${total_cost:.4f}")
+    print(f"  {_cost_line(total_cost)}")
     print(f"  Time elapsed:   {elapsed:.1f}s")
     print("─" * 60)
     print()
+
+
+def _cost_line(cost: float) -> str:
+    if uses_plan_usage():
+        return f"API-equiv. cost: ${cost:.4f} (not billed — uses your Claude plan)"
+    return f"Est. cost:      ${cost:.4f}"
 
 
 def _record_watchlist(args, records: list) -> None:
@@ -523,29 +579,40 @@ def _analyze_one(args, path: str) -> tuple:
     """Analyze a single filing for watch mode.
 
     Returns:
-        (filing, report_path) on success, or (None, reason) on failure.
+        (filing, report_path, None) on success, (None, reason, None) when the
+        filing itself failed, or (None, reason, error) when the PipelineError
+        `error` would have failed any filing.
     """
     doc_info = load_document(filepath=path)
     if doc_info is None:
-        return None, "could not be loaded"
+        return None, "could not be loaded", None
 
     started = time.time()
     try:
         analysis = analyze_document_multi(doc_info.text, model=args.model)
+    except PipelineError as e:
+        return None, e.reason, e if e.systemic else None
     except SystemExit:
-        # The pipeline exits on API failure; in watch mode that's one filing
-        # to retry later, not a reason to stop watching.
-        return None, "analysis failed"
+        return None, "analysis failed", None
 
     report_path = _write_filing_report(
         doc_info, analysis, time.time() - started, export_html=args.html
     )
-    return make_filing_analysis(doc_info.filename, analysis, report_path), report_path
+    filing = make_filing_analysis(doc_info.filename, analysis, report_path)
+    return filing, report_path, None
 
 
 def _watch_pass(args, ledger: dict) -> int:
-    """Analyze everything new in the watched directory. Returns files handled."""
-    paths = find_documents(args.watch_dir)
+    """Analyze everything new in the watched directory. Returns files handled.
+
+    Raises:
+        PipelineError: When the failure needs a restart to fix (a rejected
+            key, an unknown model), so the watcher stops instead of logging
+            the same error on every poll.
+    """
+    # Quiet: an empty inbox is the normal steady state for a watcher, and
+    # the directory itself was validated once at startup.
+    paths = find_documents(args.watch_dir, verbose=False)
     if paths is None:
         return 0
 
@@ -562,7 +629,18 @@ def _watch_pass(args, ledger: dict) -> int:
     handled = 0
     for path, digest in pending:
         name = os.path.basename(path)
-        filing, outcome = _analyze_one(args, path)
+        filing, outcome, systemic = _analyze_one(args, path)
+        if systemic is not None and systemic.needs_restart:
+            raise systemic
+        if systemic is not None:
+            # Nothing about this filing caused it, and the rest of the queue
+            # would fail the same way. Counting it would, over a few passes,
+            # permanently abandon every filing because of one config mistake.
+            print(
+                f"   ⏸️  Pausing this pass: {outcome}. Nothing was counted against "
+                "the filings; they'll be retried on the next pass."
+            )
+            break
         if filing is None:
             attempts = mark_failed(ledger, digest, name, outcome)
             remaining = WATCH_MAX_ATTEMPTS - attempts
@@ -593,6 +671,10 @@ def _watch_pass(args, ledger: dict) -> int:
 
 def run_watch_dir(args) -> None:
     """Watch a directory and analyze filings as they land."""
+    if not os.path.isdir(args.watch_dir):
+        print(f"❌ Directory '{args.watch_dir}' does not exist.")
+        sys.exit(1)
+
     try:
         ledger = load_ledger(args.ledger_path)
     except LedgerError as e:
@@ -600,6 +682,16 @@ def run_watch_dir(args) -> None:
         print("   Refusing to continue: an unreadable ledger would re-analyze — and")
         print("   re-bill — every filing in the directory. Fix or move the file.")
         sys.exit(1)
+
+    if args.retry_failed:
+        cleared = clear_failures(ledger)
+        if cleared:
+            try:
+                save_ledger(ledger, args.ledger_path)
+            except OSError as e:
+                print(f"❌ Could not write ledger '{args.ledger_path}': {e}")
+                sys.exit(1)
+        print(f"🔁 Cleared {cleared} recorded failure(s); those filings will be retried.")
 
     analyzed, failed, _ = ledger_summary(ledger)
     print()
@@ -619,6 +711,7 @@ def run_watch_dir(args) -> None:
         print()
 
     total = 0
+    stopped_on = None
     try:
         while True:
             total += _watch_pass(args, ledger)
@@ -627,6 +720,13 @@ def run_watch_dir(args) -> None:
             time.sleep(args.poll_interval)
     except KeyboardInterrupt:
         print("\n\n⏹️  Stopped.")
+    except PipelineError as e:
+        stopped_on = e
+        print(
+            f"\n🛑 Stopping the watcher: {e.reason}. The API key and model are read "
+            "at startup, so this won't clear up on its own — fix it and restart."
+        )
+        print("   Nothing was counted against the filings.")
 
     analyzed, failed, exhausted = ledger_summary(ledger)
     print()
@@ -640,6 +740,8 @@ def run_watch_dir(args) -> None:
     print(f"  Ledger:             {args.ledger_path}")
     print("─" * 60)
     print()
+    if stopped_on is not None:
+        sys.exit(1)
 
 
 def run_export_html(args) -> None:
@@ -688,11 +790,11 @@ def run_show_watchlist(args) -> None:
 
 
 def _warn_pricing(final_call) -> bool:
-    pricing_uncertain = final_call.model != MODEL
+    pricing_uncertain = not pricing_known(final_call.model)
     if pricing_uncertain:
         print(
-            f"⚠️  Cost estimate uses {MODEL} pricing but the responses came from "
-            f"{final_call.model}. The estimate may not reflect actual billed cost."
+            f"⚠️  No published pricing on file for {final_call.model}; the cost "
+            "estimate uses the config constants and may not match the bill."
         )
     return pricing_uncertain
 
@@ -715,7 +817,7 @@ def run_comparison(args) -> None:
     elapsed = time.time() - start_time
 
     usage = _aggregate_usage(filings, trajectory)
-    total_cost = estimate_cost(*usage)
+    total_cost = estimate_cost(*usage, model=trajectory.model)
     pricing_uncertain = _warn_pricing(trajectory)
 
     output_path = write_comparison_report(
@@ -732,7 +834,7 @@ def run_comparison(args) -> None:
         pricing_uncertain=pricing_uncertain,
     )
     if args.html:
-        export_markdown_file(output_path)
+        _export_html_safely(output_path)
     _print_group_summary(
         "COMPARISON SUMMARY", "Period report:", filings, output_path,
         trajectory.model, usage, total_cost, elapsed,
@@ -769,7 +871,7 @@ def run_peers(args) -> None:
     elapsed = time.time() - start_time
 
     usage = _aggregate_usage(filings, peer_analysis)
-    total_cost = estimate_cost(*usage)
+    total_cost = estimate_cost(*usage, model=peer_analysis.model)
     pricing_uncertain = _warn_pricing(peer_analysis)
 
     output_path = write_peer_report(
@@ -786,7 +888,7 @@ def run_peers(args) -> None:
         pricing_uncertain=pricing_uncertain,
     )
     if args.html:
-        export_markdown_file(output_path)
+        _export_html_safely(output_path)
     _print_group_summary(
         "PEER SUMMARY", "Company report:", ranked, output_path,
         peer_analysis.model, usage, total_cost, elapsed,
@@ -855,7 +957,7 @@ def run_batch(args) -> None:
     elapsed = time.time() - start_time
 
     usage = _aggregate_usage(filings, sector)
-    total_cost = estimate_cost(*usage)
+    total_cost = estimate_cost(*usage, model=sector.model)
     pricing_uncertain = _warn_pricing(sector)
 
     output_path = write_batch_report(
@@ -875,7 +977,7 @@ def run_batch(args) -> None:
         pricing_uncertain=pricing_uncertain,
     )
     if args.html:
-        export_markdown_file(output_path)
+        _export_html_safely(output_path)
     _print_group_summary(
         "SECTOR SUMMARY", "Company report:", ranked, output_path,
         sector.model, usage, total_cost, elapsed,
@@ -896,8 +998,193 @@ def run_batch(args) -> None:
         )
 
 
+def _display_width(text: str) -> int:
+    """Terminal columns `text` occupies; CJK and fullwidth characters take two."""
+    return sum(2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1 for ch in text)
+
+
+def _fit(text: str, width: int) -> str:
+    """Left-align `text` in `width` terminal columns, truncating with '...'."""
+    if _display_width(text) > width:
+        kept, used = [], 0
+        for ch in text:
+            ch_width = _display_width(ch)
+            if used + ch_width > width - 3:
+                break
+            kept.append(ch)
+            used += ch_width
+        text = "".join(kept) + "..."
+    return text + " " * (width - _display_width(text))
+
+
+def _dry_run_targets(args) -> tuple:
+    """The filings a real run with these arguments would analyze.
+
+    Returns (paths, group agent as (label, instructions) or None, notes,
+    fatal) where `fatal` means the real run would stop at loading.
+    """
+    from prompts.comparison import COMPARISON_INSTRUCTIONS
+    from prompts.peer_comparison import PEER_COMPARISON_INSTRUCTIONS
+    from prompts.sector_summary import SECTOR_SUMMARY_INSTRUCTIONS
+
+    notes = []
+    if args.compare:
+        return args.compare, ("Comparison agent", COMPARISON_INSTRUCTIONS), notes, True
+    if args.peers:
+        return args.peers, ("Peer agent", PEER_COMPARISON_INSTRUCTIONS), notes, True
+    if args.batch:
+        paths = find_documents(args.batch)
+        if paths is None:
+            sys.exit(1)
+        if args.batch_limit is not None and len(paths) > args.batch_limit:
+            notes.append(
+                f"{len(paths) - args.batch_limit} filing(s) beyond --batch-limit "
+                f"{args.batch_limit} excluded."
+            )
+            paths = paths[: args.batch_limit]
+        return paths, ("Sector agent", SECTOR_SUMMARY_INSTRUCTIONS), notes, False
+    if args.watch_dir:
+        if not os.path.isdir(args.watch_dir):
+            print(f"❌ Directory '{args.watch_dir}' does not exist.")
+            sys.exit(1)
+        try:
+            ledger = load_ledger(args.ledger_path)   # read only; never saved here
+        except LedgerError as e:
+            print(f"❌ {e}")
+            sys.exit(1)
+        candidates = find_documents(args.watch_dir, verbose=False) or []
+        pending, waiting, duplicates = pending_files(candidates, ledger)
+        done = len(candidates) - len(pending) - len(waiting) - len(duplicates)
+        if done:
+            notes.append(f"{done} file(s) already analyzed or given up on would be skipped.")
+        if waiting:
+            notes.append(f"{len(waiting)} file(s) still being written would wait for a later pass.")
+        if duplicates:
+            notes.append(f"{len(duplicates)} duplicate(s) of other pending files would be skipped.")
+        return [path for path, _ in pending], None, notes, False
+    return [args.file], None, notes, True   # None means "most recent in input/"
+
+
+def run_dry_run(args) -> None:
+    """Estimate what a run would cost without making any API calls."""
+    paths, group, notes, fatal = _dry_run_targets(args)
+
+    rows, unreadable = [], []
+    for path in paths:
+        captured = io.StringIO()
+        with contextlib.redirect_stdout(captured):
+            doc = load_document(filepath=path)
+        if doc is None:
+            reason = next(
+                (
+                    line.replace("❌", "").strip()
+                    for line in captured.getvalue().splitlines()
+                    if "❌" in line
+                ),
+                "could not be loaded",
+            )
+            # The loader's message already names the file by basename; repeat
+            # only that, not a full path that may run off the terminal.
+            if path:
+                reason = reason.replace(path, os.path.basename(path))
+            unreadable.append((os.path.basename(path) if path else "input/", reason))
+            continue
+        estimate = (
+            estimate_single(doc.text, args.model, args.max_tokens)
+            if args.single
+            else estimate_pipeline(doc.text, args.model)
+        )
+        rows.append((doc, estimate))
+
+    group_estimate = None
+    if group and rows:
+        group_estimate = estimate_group_agent(len(rows), group[1], args.model)
+
+    profile = profile_for(args.model)
+    pricing = (
+        f"{profile.family}: ${profile.input_per_million:g}/M in, "
+        f"${profile.output_per_million:g}/M out"
+        if profile
+        else "no published pricing on file; using config constants"
+    )
+    mode = "single agent" if args.single else "6 specialists + synthesis per filing"
+    if group:
+        mode += f", then a {group[0].lower()}"
+
+    print()
+    print("=" * 72)
+    print("  💵 Asia Equity Analyzer — Dry Run (no API calls made)")
+    print("=" * 72)
+    print()
+    print(f"  Model:  {args.model} ({pricing})")
+    print(f"  Mode:   {mode}")
+    print()
+
+    if rows:
+        print(f"  {'Filing':<34} {'Pages':>5} {'~Tokens':>10} {'Expected':>10} {'Ceiling':>10}")
+        print(f"  {'─' * 34} {'─' * 5} {'─' * 10} {'─' * 10} {'─' * 10}")
+        total = None
+        for doc, estimate in rows:
+            marker = " ✂" if doc.was_truncated else ""
+            pages = f"{doc.page_count:,}" if doc.page_count else "—"
+            print(
+                f"  {_fit(doc.filename, 34)} {pages:>5} {estimate.input_tokens:>10,} "
+                f"{'$' + format(estimate.expected, '.2f'):>10} "
+                f"{'$' + format(estimate.ceiling, '.2f'):>10}{marker}"
+            )
+            total = estimate if total is None else total + estimate
+        if group_estimate:
+            print(
+                f"  {group[0]:<34} {'':>5} {group_estimate.input_tokens:>10,} "
+                f"{'$' + format(group_estimate.expected, '.2f'):>10} "
+                f"{'$' + format(group_estimate.ceiling, '.2f'):>10}"
+            )
+            total = total + group_estimate
+        print(f"  {'─' * 34} {'─' * 5} {'─' * 10} {'─' * 10} {'─' * 10}")
+        label = f"Total ({len(rows)} filing{'s' if len(rows) != 1 else ''})"
+        print(
+            f"  {label:<34} {'':>5} {'':>10} "
+            f"{'$' + format(total.expected, '.2f'):>10} {'$' + format(total.ceiling, '.2f'):>10}"
+        )
+        print()
+    else:
+        print("  Nothing to analyze.")
+        print()
+
+    for note in notes:
+        print(f"  ℹ️  {note}")
+    if any(doc.was_truncated for doc, _ in rows):
+        print("  ✂  Truncated to MAX_DOCUMENT_CHARS; later pages would not be analyzed.")
+    if rows and not args.single and not all(e.cached for _, e in rows):
+        print("  ℹ️  Some filings are too short to benefit from prompt caching and are")
+        print("     estimated without it.")
+    if args.watch is not None or args.html:
+        print("  ℹ️  --watch and --html have no effect on a dry run; nothing was recorded.")
+    for path, reason in unreadable:
+        print(f"  ❌ {path}: {reason}")
+    if unreadable and fatal:
+        print("     The real run would stop here, before spending anything.")
+
+    print()
+    print("  Estimates, not quotes: tokens assume ~3.5 characters each (1 per CJK")
+    print("  character), 'Expected' assumes each agent uses ~40% of its output budget,")
+    print("  and 'Ceiling' assumes every agent uses all of it.")
+    if uses_plan_usage():
+        print("  Backend claude-code: these are API-equivalent figures. Nothing is billed;")
+        print("  the run draws on your Claude plan's usage limits instead.")
+    print()
+
+    if unreadable and fatal:
+        sys.exit(1)
+
+
 def main():
     args = parse_args()
+    if args.backend is None:
+        print(f"❌ ANALYZER_BACKEND={BACKEND!r} is not a backend; use one of: "
+              f"{', '.join(BACKENDS)}.")
+        sys.exit(1)
+    set_backend(args.backend)
 
     if args.export_html:
         run_export_html(args)
@@ -905,6 +1192,17 @@ def main():
     if args.show_watchlist:
         run_show_watchlist(args)
         return
+    if args.dry_run:
+        run_dry_run(args)
+        return
+    if not has_credentials():
+        # Checked before any loading, ledger access, or loop: a missing key
+        # otherwise surfaces per filing, and in watch mode was counted
+        # against each file's retry budget.
+        for line in credentials_help():
+            print(line)
+        print("   (--dry-run, --show-watchlist and --export-html work without one.)")
+        sys.exit(1)
     if args.compare:
         run_comparison(args)
         return
@@ -958,15 +1256,10 @@ def main():
 
     # Step 3: Write report
     cost = estimate_cost(
-        analysis.input_tokens, analysis.output_tokens, cache_creation, cache_read
+        analysis.input_tokens, analysis.output_tokens, cache_creation, cache_read,
+        model=analysis.model,
     )
-    pricing_uncertain = analysis.model != MODEL
-    if pricing_uncertain:
-        print(
-            f"⚠️  Cost estimate uses {MODEL} pricing (${INPUT_TOKEN_COST_PER_MILLION}/M in, "
-            f"${OUTPUT_TOKEN_COST_PER_MILLION}/M out) but the response came from {analysis.model}. "
-            "The estimate below may not reflect actual billed cost."
-        )
+    pricing_uncertain = _warn_pricing(analysis)
     output_path = write_report(
         analysis_text=analysis.text,
         source_filename=doc_info.filename,
@@ -982,6 +1275,7 @@ def main():
         cache_creation_tokens=cache_creation,
         cache_read_tokens=cache_read,
         agent_stats=agent_stats,
+        incomplete_sections=analysis.incomplete_sections,
     )
 
     # Step 4: Summary
@@ -1005,13 +1299,13 @@ def main():
     print(f"  Output tokens:  {analysis.output_tokens:,}")
     total = analysis.input_tokens + cache_creation + cache_read + analysis.output_tokens
     print(f"  Total tokens:   {total:,}")
-    print(f"  Est. cost:      ${cost:.4f}")
+    print(f"  {_cost_line(cost)}")
     print(f"  Time elapsed:   {elapsed:.1f}s")
     print("─" * 60)
     print()
 
     if args.html:
-        export_markdown_file(output_path)
+        _export_html_safely(output_path)
         print()
 
     # Step 5: Watchlist

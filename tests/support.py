@@ -2,7 +2,7 @@
 
 Import this FIRST in every test module. Installing the stubs is an import-time
 side effect, so it has to happen before anything imports the app modules that
-pull in `anthropic`, `fitz`, or `dotenv`.
+pull in `anthropic`, `pymupdf`, or `dotenv`.
 """
 
 from __future__ import annotations
@@ -28,12 +28,23 @@ class _StubAPIError(Exception):
         self.status_code = status_code
 
 
+def has_real_pymupdf() -> bool:
+    """True when the real PDF library is installed (not our stub)."""
+    module = sys.modules.get("pymupdf")
+    return module is not None and hasattr(module, "open")
+
+
 def install_stubs() -> None:
     """Install stand-ins for the third-party packages the app imports.
 
     The suite never touches the network; live behavior is covered separately
     by tests/smoke_live.py, which needs real credentials.
     """
+    # Pin the API backend, whose client every test replaces with a fake. The
+    # default claude-code backend would start a real `claude` process — and
+    # spend the user's plan usage — from any test that forgot to stub it.
+    # Tests of the claude-code backend opt in explicitly with set_backend().
+    os.environ["ANALYZER_BACKEND"] = "api"
     if "anthropic" not in sys.modules:
         anthropic = types.ModuleType("anthropic")
         anthropic.Anthropic = FakeAnthropic
@@ -42,8 +53,14 @@ def install_stubs() -> None:
         anthropic.APIStatusError = type("APIStatusError", (_StubAPIError,), {})
         sys.modules["anthropic"] = anthropic
 
-    if "fitz" not in sys.modules:
-        sys.modules["fitz"] = types.ModuleType("fitz")
+    # pymupdf is the one dependency worth using for real when it's present:
+    # PDF extraction is a code path stubs cannot exercise. Tests that need it
+    # are guarded with @unittest.skipUnless(REAL_PYMUPDF, ...).
+    if "pymupdf" not in sys.modules:
+        try:
+            import pymupdf  # noqa: F401
+        except ImportError:
+            sys.modules["pymupdf"] = types.ModuleType("pymupdf")
 
     if "dotenv" not in sys.modules:
         dotenv = types.ModuleType("dotenv")
@@ -97,8 +114,11 @@ class FakeMessages:
             cache_creation=500 if first else 0,
             cache_read=0 if first else 500,
         )
+        stop_reason = self._client.stop_reason
+        if callable(stop_reason):
+            stop_reason = stop_reason(kwargs)
         return FakeResponse(text, model=self._client.model, usage=usage,
-                            stop_reason=self._client.stop_reason)
+                            stop_reason=stop_reason)
 
 
 class FakeAnthropic:

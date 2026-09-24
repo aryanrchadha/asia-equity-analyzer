@@ -108,7 +108,9 @@ class ModeTest(unittest.TestCase):
             self.analyses.append(text)
             return make_analysis()
 
+        self.working_pipeline = fake_pipeline
         main.analyze_document_multi = fake_pipeline
+        main.has_credentials = lambda: True
         main.analyze_trajectory = lambda *a, **k: stub_section()
         main.analyze_peers = lambda *a, **k: stub_section()
         main.analyze_sector = lambda *a, **k: stub_section()
@@ -262,6 +264,40 @@ class TestWatchDir(ModeTest):
         assert self.analyses == []
         with open("bad.json") as f:
             assert f.read() == "{not json"
+
+    def test_empty_inbox_is_not_reported_as_an_error(self):
+        # Regression: an empty inbox is a watcher's normal steady state, but
+        # every poll logged "No .pdf or .txt files found" — 1,440 error lines
+        # a day at the default interval, for a healthy setup.
+        os.makedirs("empty_inbox")
+        out = self.run_cli("--watch-dir", "empty_inbox", "--once", "--ledger-path", "l.json")
+        assert "No .pdf or .txt files found" not in out
+        assert "❌" not in out
+
+    def test_missing_directory_still_fails_loudly_at_startup(self):
+        with self.assertRaises(SystemExit) as caught:
+            self.run_cli("--watch-dir", "nope", "--once", "--ledger-path", "l.json")
+        assert caught.exception.code == 1
+
+    def test_html_export_failure_does_not_kill_the_watcher(self):
+        # Regression: an OSError from the export propagated out of the loop,
+        # killing an unattended watcher after the analysis was already paid
+        # for — and before the ledger recorded it, so a restart re-billed it.
+        def failing_export(path, output_path=None):
+            raise OSError(28, "No space left on device")
+
+        real_export = main.export_markdown_file
+        main.export_markdown_file = failing_export
+        try:
+            out = self.run_cli("--watch-dir", "filings", "--once", "--html",
+                               "--ledger-path", "l.json")
+        finally:
+            main.export_markdown_file = real_export
+        assert "HTML export failed" in out
+        assert len(self.analyses) == 2, "analysis should still have run"
+        with open("l.json") as f:
+            assert len(json.load(f)["files"]) == 2, "paid-for work must be recorded"
+        assert len([f for f in os.listdir("output") if f.endswith(".md")]) == 2
 
     def test_continuous_mode_stops_cleanly_on_interrupt(self):
         slept = []

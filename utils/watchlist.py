@@ -15,6 +15,7 @@ from datetime import datetime
 
 from config import WATCHLIST_ALERT_THRESHOLD, WATCHLIST_PATH
 from utils.json_store import StoreError, empty_store, load_store, save_store
+from utils.report_writer import _escape_table_cell
 from utils.score_parser import GOVERNANCE_TO_NUMERIC, ScoreCard
 
 SCHEMA_VERSION = 1
@@ -190,9 +191,9 @@ def format_watchlist_table(data: dict, threshold: float = WATCHLIST_ALERT_THRESH
         rows.append(
             (
                 latest.get("recorded_at", ""),
-                f"| {company} | {len(entries)} | {_format_value(new_composite)} "
+                f"| {_escape_table_cell(company)} | {len(entries)} | {_format_value(new_composite)} "
                 f"| {_format_value(old_composite)} | {delta_text} "
-                f"| {_format_value(latest_scores.get('governance'))} "
+                f"| {_escape_table_cell(_format_value(latest_scores.get('governance')))} "
                 f"| {latest.get('recorded_at', 'n/a')} | {alert_text} |",
             )
         )
