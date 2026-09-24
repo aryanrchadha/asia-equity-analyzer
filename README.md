@@ -117,6 +117,20 @@ Files are analyzed in filename order (so runs are reproducible), each getting it
 
 Batch mode is built to survive a messy directory: a filing that can't be loaded or whose analysis fails is skipped, listed in a **Skipped Filings** section of the report, and named in the sector agent's own context so its conclusions acknowledge the gap. Filings dropped by `--batch-limit` are listed the same way — nothing is silently omitted. Three consecutive analysis failures stop the run, since that means the problem is your credentials or quota rather than the documents.
 
+### Dry Run
+
+Add `--dry-run` to any analysis command to see which filings it would analyze and what it would cost, without spending anything:
+
+```bash
+python main.py --batch input/semiconductors --dry-run
+python main.py --watch-dir input/inbox --dry-run      # what the next pass would pick up
+python main.py --file report.pdf --model claude-opus-5 --dry-run
+```
+
+Text is extracted locally and priced with the chosen model's own rates, including the prompt-cache discount on the five specialists that re-read the document and the larger output budget of models that think by default. Each filing shows an **expected** cost (agents using ~40% of their output budget) and a **ceiling** (every agent using all of it). Token counts are deliberately estimated high.
+
+A dry run never writes a report, the watchlist, or the ledger. It exits non-zero when the real run would fail — a `--compare` or `--peers` list containing a file that can't be loaded — so it can gate a scripted run.
+
 ### Directory Watch
 
 Point `--watch-dir` at a folder and each filing is analyzed as it lands:
@@ -357,7 +371,8 @@ Each report includes an **Agent Breakdown** table with per-agent token usage and
 - ✅ **Week 7** — HTML export (`--html` / `--export-html`): self-contained, styled, escape-safe report pages
 - ✅ **Week 8** — directory watch (`--watch-dir`): analyze filings as they land, with a content-hashed ledger so nothing is analyzed twice
 - ✅ **Week 9** — test suite (99 stdlib tests) plus `tests/smoke_live.py`, the live prompt-contract check
-- 🗓️ **Week 10** — run the live smoke test against a real filing and tune whichever prompts drift from the contract
+- ✅ **Week 10** — model-aware requests and pricing, refusal and truncation surfaced in saved reports, `--dry-run` cost preview
+- 🗓️ **Week 11** — run the live smoke test against a real filing (needs an API key) and tune whichever prompts drift from the contract
 
 ## License
 

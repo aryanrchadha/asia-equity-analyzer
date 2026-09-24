@@ -15,6 +15,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from config import (
+    CACHE_READ_COST_PER_MILLION,
+    CACHE_WRITE_COST_PER_MILLION,
+    INPUT_TOKEN_COST_PER_MILLION,
+    OUTPUT_TOKEN_COST_PER_MILLION,
+)
+
 # The API's own default. Sending it explicitly changes nothing on models that
 # accept it and is a hard error on models that don't, so it is never sent.
 API_DEFAULT_TEMPERATURE = 1.0
@@ -33,6 +40,9 @@ class ModelProfile:
     output_per_million: float
     accepts_sampling_params: bool   # temperature / top_p / top_k
     thinks_by_default: bool         # omitting `thinking` still thinks
+    # The tokenizer introduced with Opus 4.7 yields up to ~1.35x the tokens
+    # for the same text; used only to scale pre-run cost estimates.
+    new_tokenizer: bool = False
 
     @property
     def cache_write_per_million(self) -> float:
@@ -45,14 +55,16 @@ class ModelProfile:
 
 # Longest prefix wins, so "claude-opus-4-8" never matches "claude-opus-4".
 _PROFILES = {
-    "claude-fable-5": ModelProfile("Fable 5", 10.0, 50.0, False, True),
-    "claude-mythos-5": ModelProfile("Mythos 5", 10.0, 50.0, False, True),
-    "claude-opus-5": ModelProfile("Opus 5", 5.0, 25.0, False, True),
-    "claude-opus-4-8": ModelProfile("Opus 4.8", 5.0, 25.0, False, False),
-    "claude-opus-4-7": ModelProfile("Opus 4.7", 5.0, 25.0, False, False),
+    "claude-fable-5": ModelProfile("Fable 5", 10.0, 50.0, False, True, True),
+    "claude-mythos-5": ModelProfile("Mythos 5", 10.0, 50.0, False, True, True),
+    # Opus 5's tokenizer is assumed to match Opus 4.8's; if it doesn't, the
+    # only effect is a pre-run estimate that errs high.
+    "claude-opus-5": ModelProfile("Opus 5", 5.0, 25.0, False, True, True),
+    "claude-opus-4-8": ModelProfile("Opus 4.8", 5.0, 25.0, False, False, True),
+    "claude-opus-4-7": ModelProfile("Opus 4.7", 5.0, 25.0, False, False, True),
     "claude-opus-4-6": ModelProfile("Opus 4.6", 5.0, 25.0, True, False),
     "claude-opus-4-5": ModelProfile("Opus 4.5", 5.0, 25.0, True, False),
-    "claude-sonnet-5": ModelProfile("Sonnet 5", 3.0, 15.0, False, True),
+    "claude-sonnet-5": ModelProfile("Sonnet 5", 3.0, 15.0, False, True, True),
     "claude-sonnet-4-6": ModelProfile("Sonnet 4.6", 3.0, 15.0, True, False),
     "claude-haiku-4-5": ModelProfile("Haiku 4.5", 1.0, 5.0, True, False),
 }
@@ -104,3 +116,37 @@ def pricing_for(model: str | None, fallback: tuple[float, float]) -> tuple[float
     if profile is None:
         return fallback[0], fallback[1], False
     return profile.input_per_million, profile.output_per_million, True
+
+
+def pricing_known(model: str | None) -> bool:
+    """False when a cost estimate has to fall back to the config constants."""
+    return profile_for(model) is not None
+
+
+def estimate_cost(
+    input_tokens: float,
+    output_tokens: float,
+    cache_creation_tokens: float = 0,
+    cache_read_tokens: float = 0,
+    model: str | None = None,
+) -> float:
+    """Estimate USD cost, including prompt-cache writes (1.25x) and reads (0.1x).
+
+    Uses the model's published pricing when it's in the table above, and the
+    config constants otherwise — callers should flag the latter via
+    pricing_known() rather than present it as the bill.
+    """
+    profile = profile_for(model)
+    if profile is not None:
+        input_rate, output_rate = profile.input_per_million, profile.output_per_million
+        write_rate = profile.cache_write_per_million
+        read_rate = profile.cache_read_per_million
+    else:
+        input_rate, output_rate = INPUT_TOKEN_COST_PER_MILLION, OUTPUT_TOKEN_COST_PER_MILLION
+        write_rate, read_rate = CACHE_WRITE_COST_PER_MILLION, CACHE_READ_COST_PER_MILLION
+    return (
+        input_tokens * input_rate
+        + output_tokens * output_rate
+        + cache_creation_tokens * write_rate
+        + cache_read_tokens * read_rate
+    ) / 1_000_000

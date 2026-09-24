@@ -30,17 +30,16 @@ Usage:
 """
 
 import argparse
+import contextlib
+import io
 import os
 import sys
 import time
+import unicodedata
 
 from config import (
-    CACHE_READ_COST_PER_MILLION,
-    CACHE_WRITE_COST_PER_MILLION,
-    INPUT_TOKEN_COST_PER_MILLION,
     MAX_TOKENS,
     MODEL,
-    OUTPUT_TOKEN_COST_PER_MILLION,
     LEDGER_PATH,
     TEMPERATURE,
     WATCH_MAX_ATTEMPTS,
@@ -48,6 +47,7 @@ from config import (
     WATCHLIST_PATH,
     WATCH_POLL_SECONDS,
 )
+from utils.cost_preview import estimate_group_agent, estimate_pipeline, estimate_single
 from utils.document_loader import find_documents, load_document
 from utils.file_ledger import (
     LedgerError,
@@ -59,7 +59,9 @@ from utils.file_ledger import (
     save_ledger,
 )
 from utils.html_export import export_markdown_file
-from utils.models import pricing_for
+# estimate_cost and pricing_known are re-exported here for callers
+# (and tests) that reach them through main.
+from utils.models import estimate_cost, pricing_known, profile_for  # noqa: F401
 from utils.report_writer import (
     sanitize_filename,
     write_batch_report,
@@ -177,6 +179,12 @@ def parse_args() -> argparse.Namespace:
         metavar="PATH",
         default=LEDGER_PATH,
         help="Path to the JSON record of which filings have been analyzed.",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show which filings would be analyzed and what it would cost, then "
+        "exit. Extracts text locally; makes no API calls.",
     )
     parser.add_argument(
         "--html",
@@ -302,41 +310,11 @@ def parse_args() -> argparse.Namespace:
                 f"--export-html converts existing reports and exits; drop "
                 f"{', '.join(conflicting)}."
             )
+    if args.dry_run and (args.show_watchlist or args.export_html):
+        parser.error("--show-watchlist and --export-html make no API calls; --dry-run adds nothing.")
     if args.alert_threshold < 0:
         parser.error("--alert-threshold must be zero or positive.")
     return args
-
-
-def estimate_cost(
-    input_tokens: int,
-    output_tokens: int,
-    cache_creation_tokens: int = 0,
-    cache_read_tokens: int = 0,
-    model: str | None = None,
-) -> float:
-    """Estimate the API cost in USD, including prompt-cache writes and reads.
-
-    Uses the model's published pricing when it's in utils/models.py, and the
-    config constants otherwise (see pricing_known()).
-    """
-    input_rate, output_rate, known = pricing_for(
-        model, (INPUT_TOKEN_COST_PER_MILLION, OUTPUT_TOKEN_COST_PER_MILLION)
-    )
-    if known:
-        write_rate, read_rate = input_rate * 1.25, input_rate * 0.10
-    else:
-        write_rate, read_rate = CACHE_WRITE_COST_PER_MILLION, CACHE_READ_COST_PER_MILLION
-    return (
-        (input_tokens / 1_000_000) * input_rate
-        + (output_tokens / 1_000_000) * output_rate
-        + (cache_creation_tokens / 1_000_000) * write_rate
-        + (cache_read_tokens / 1_000_000) * read_rate
-    )
-
-
-def pricing_known(model: str | None) -> bool:
-    """False when the cost estimate had to fall back to the config constants."""
-    return pricing_for(model, (0.0, 0.0))[2]
 
 
 def _export_html_safely(report_path: str) -> None:
@@ -937,6 +915,183 @@ def run_batch(args) -> None:
         )
 
 
+def _display_width(text: str) -> int:
+    """Terminal columns `text` occupies; CJK and fullwidth characters take two."""
+    return sum(2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1 for ch in text)
+
+
+def _fit(text: str, width: int) -> str:
+    """Left-align `text` in `width` terminal columns, truncating with '...'."""
+    if _display_width(text) > width:
+        kept, used = [], 0
+        for ch in text:
+            ch_width = _display_width(ch)
+            if used + ch_width > width - 3:
+                break
+            kept.append(ch)
+            used += ch_width
+        text = "".join(kept) + "..."
+    return text + " " * (width - _display_width(text))
+
+
+def _dry_run_targets(args) -> tuple:
+    """The filings a real run with these arguments would analyze.
+
+    Returns (paths, group agent as (label, instructions) or None, notes,
+    fatal) where `fatal` means the real run would stop at loading.
+    """
+    from prompts.comparison import COMPARISON_INSTRUCTIONS
+    from prompts.peer_comparison import PEER_COMPARISON_INSTRUCTIONS
+    from prompts.sector_summary import SECTOR_SUMMARY_INSTRUCTIONS
+
+    notes = []
+    if args.compare:
+        return args.compare, ("Comparison agent", COMPARISON_INSTRUCTIONS), notes, True
+    if args.peers:
+        return args.peers, ("Peer agent", PEER_COMPARISON_INSTRUCTIONS), notes, True
+    if args.batch:
+        paths = find_documents(args.batch)
+        if paths is None:
+            sys.exit(1)
+        if args.batch_limit is not None and len(paths) > args.batch_limit:
+            notes.append(
+                f"{len(paths) - args.batch_limit} filing(s) beyond --batch-limit "
+                f"{args.batch_limit} excluded."
+            )
+            paths = paths[: args.batch_limit]
+        return paths, ("Sector agent", SECTOR_SUMMARY_INSTRUCTIONS), notes, False
+    if args.watch_dir:
+        if not os.path.isdir(args.watch_dir):
+            print(f"❌ Directory '{args.watch_dir}' does not exist.")
+            sys.exit(1)
+        try:
+            ledger = load_ledger(args.ledger_path)   # read only; never saved here
+        except LedgerError as e:
+            print(f"❌ {e}")
+            sys.exit(1)
+        candidates = find_documents(args.watch_dir, verbose=False) or []
+        pending, waiting, duplicates = pending_files(candidates, ledger)
+        done = len(candidates) - len(pending) - len(waiting) - len(duplicates)
+        if done:
+            notes.append(f"{done} file(s) already analyzed or given up on would be skipped.")
+        if waiting:
+            notes.append(f"{len(waiting)} file(s) still being written would wait for a later pass.")
+        if duplicates:
+            notes.append(f"{len(duplicates)} duplicate(s) of other pending files would be skipped.")
+        return [path for path, _ in pending], None, notes, False
+    return [args.file], None, notes, True   # None means "most recent in input/"
+
+
+def run_dry_run(args) -> None:
+    """Estimate what a run would cost without making any API calls."""
+    paths, group, notes, fatal = _dry_run_targets(args)
+
+    rows, unreadable = [], []
+    for path in paths:
+        captured = io.StringIO()
+        with contextlib.redirect_stdout(captured):
+            doc = load_document(filepath=path)
+        if doc is None:
+            reason = next(
+                (
+                    line.replace("❌", "").strip()
+                    for line in captured.getvalue().splitlines()
+                    if "❌" in line
+                ),
+                "could not be loaded",
+            )
+            # The loader's message already names the file by basename; repeat
+            # only that, not a full path that may run off the terminal.
+            if path:
+                reason = reason.replace(path, os.path.basename(path))
+            unreadable.append((os.path.basename(path) if path else "input/", reason))
+            continue
+        estimate = (
+            estimate_single(doc.text, args.model, args.max_tokens)
+            if args.single
+            else estimate_pipeline(doc.text, args.model)
+        )
+        rows.append((doc, estimate))
+
+    group_estimate = None
+    if group and rows:
+        group_estimate = estimate_group_agent(len(rows), group[1], args.model)
+
+    profile = profile_for(args.model)
+    pricing = (
+        f"{profile.family}: ${profile.input_per_million:g}/M in, "
+        f"${profile.output_per_million:g}/M out"
+        if profile
+        else "no published pricing on file; using config constants"
+    )
+    mode = "single agent" if args.single else "6 specialists + synthesis per filing"
+    if group:
+        mode += f", then a {group[0].lower()}"
+
+    print()
+    print("=" * 72)
+    print("  💵 Asia Equity Analyzer — Dry Run (no API calls made)")
+    print("=" * 72)
+    print()
+    print(f"  Model:  {args.model} ({pricing})")
+    print(f"  Mode:   {mode}")
+    print()
+
+    if rows:
+        print(f"  {'Filing':<34} {'Pages':>5} {'~Tokens':>10} {'Expected':>10} {'Ceiling':>10}")
+        print(f"  {'─' * 34} {'─' * 5} {'─' * 10} {'─' * 10} {'─' * 10}")
+        total = None
+        for doc, estimate in rows:
+            marker = " ✂" if doc.was_truncated else ""
+            pages = f"{doc.page_count:,}" if doc.page_count else "—"
+            print(
+                f"  {_fit(doc.filename, 34)} {pages:>5} {estimate.input_tokens:>10,} "
+                f"{'$' + format(estimate.expected, '.2f'):>10} "
+                f"{'$' + format(estimate.ceiling, '.2f'):>10}{marker}"
+            )
+            total = estimate if total is None else total + estimate
+        if group_estimate:
+            print(
+                f"  {group[0]:<34} {'':>5} {group_estimate.input_tokens:>10,} "
+                f"{'$' + format(group_estimate.expected, '.2f'):>10} "
+                f"{'$' + format(group_estimate.ceiling, '.2f'):>10}"
+            )
+            total = total + group_estimate
+        print(f"  {'─' * 34} {'─' * 5} {'─' * 10} {'─' * 10} {'─' * 10}")
+        label = f"Total ({len(rows)} filing{'s' if len(rows) != 1 else ''})"
+        print(
+            f"  {label:<34} {'':>5} {'':>10} "
+            f"{'$' + format(total.expected, '.2f'):>10} {'$' + format(total.ceiling, '.2f'):>10}"
+        )
+        print()
+    else:
+        print("  Nothing to analyze.")
+        print()
+
+    for note in notes:
+        print(f"  ℹ️  {note}")
+    if any(doc.was_truncated for doc, _ in rows):
+        print("  ✂  Truncated to MAX_DOCUMENT_CHARS; later pages would not be analyzed.")
+    if rows and not args.single and not all(e.cached for _, e in rows):
+        print("  ℹ️  Some filings are too short to benefit from prompt caching and are")
+        print("     estimated without it.")
+    if args.watch is not None or args.html:
+        print("  ℹ️  --watch and --html have no effect on a dry run; nothing was recorded.")
+    for path, reason in unreadable:
+        print(f"  ❌ {path}: {reason}")
+    if unreadable and fatal:
+        print("     The real run would stop here, before spending anything.")
+
+    print()
+    print("  Estimates, not quotes: tokens assume ~3.5 characters each (1 per CJK")
+    print("  character), 'Expected' assumes each agent uses ~40% of its output budget,")
+    print("  and 'Ceiling' assumes every agent uses all of it.")
+    print()
+
+    if unreadable and fatal:
+        sys.exit(1)
+
+
 def main():
     args = parse_args()
 
@@ -945,6 +1100,9 @@ def main():
         return
     if args.show_watchlist:
         run_show_watchlist(args)
+        return
+    if args.dry_run:
+        run_dry_run(args)
         return
     if args.compare:
         run_comparison(args)
