@@ -148,6 +148,11 @@ Two behaviours exist specifically to avoid wasting money:
 
 - **Files must settle before analysis.** A filing whose mtime is newer than `WATCH_SETTLE_SECONDS` (10s) is left alone until the next pass, so a PDF still being copied or downloaded isn't analyzed half-written into a garbage report at full cost.
 - **Failures retry, but not forever.** A failed filing is retried on later passes — transient rate limits and network blips shouldn't lose a filing — but after `WATCH_MAX_ATTEMPTS` (3) attempts it's given up on, so a permanently corrupt file can't bill you on every poll for the rest of the week.
+- **Only the filing's own failures count.** A missing or invalid API key, a rate limit, an outage, or a mistyped model would fail every filing alike, so they pause the pass instead of counting against each file — otherwise one configuration mistake would, within three polls, permanently abandon the whole inbox. A file-specific failure (for example a 400 on an oversized document) still counts.
+- **`--retry-failed`** forgets the recorded failures (successful analyses are kept) so given-up filings are attempted again, e.g. after fixing whatever broke them:
+  ```bash
+  python main.py --watch-dir ./inbox --once --retry-failed
+  ```
 
 The ledger is written after **each** file, not at the end of a pass, so a crash can't lose the record of work already paid for. As with the watchlist, a `processed.json` that is malformed or has an unexpected schema version stops the run rather than being overwritten — silently starting from an empty ledger would re-analyze, and re-bill, the whole directory.
 
@@ -372,6 +377,7 @@ Each report includes an **Agent Breakdown** table with per-agent token usage and
 - ✅ **Week 8** — directory watch (`--watch-dir`): analyze filings as they land, with a content-hashed ledger so nothing is analyzed twice
 - ✅ **Week 9** — test suite (99 stdlib tests) plus `tests/smoke_live.py`, the live prompt-contract check
 - ✅ **Week 10** — model-aware requests and pricing, refusal and truncation surfaced in saved reports, `--dry-run` cost preview
+- ✅ **Week 10.5** — config and outage failures no longer count against filings in watch mode; runs without an API key fail fast; `--retry-failed`
 - 🗓️ **Week 11** — run the live smoke test against a real filing (needs an API key) and tune whichever prompts drift from the contract
 
 ## License

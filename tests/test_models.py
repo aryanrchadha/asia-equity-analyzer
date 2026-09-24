@@ -111,18 +111,14 @@ class PipelineRequestTest(unittest.TestCase):
     def setUp(self):
         self.client = FakeAnthropic()
         self.patches = [(orch, "make_client", lambda: self.client),
-                        (orch, "ANTHROPIC_API_KEY", "k"),
-                        (analyst, "ANTHROPIC_API_KEY", "k")]
+                        (analyst, "make_client", lambda: self.client)]
         self.saved = [(mod, name, getattr(mod, name)) for mod, name, _ in self.patches]
         for mod, name, value in self.patches:
             setattr(mod, name, value)
-        self.real_anthropic = analyst.anthropic.Anthropic
-        analyst.anthropic.Anthropic = lambda **kw: self.client
 
     def tearDown(self):
         for mod, name, value in self.saved:
             setattr(mod, name, value)
-        analyst.anthropic.Anthropic = self.real_anthropic
 
 
 class TestPipelineRequests(PipelineRequestTest):

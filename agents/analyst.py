@@ -4,10 +4,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-import anthropic
-
-from config import ANTHROPIC_API_KEY, MAX_TOKENS, MODEL, REQUEST_TIMEOUT, TEMPERATURE
+from config import MAX_TOKENS, MODEL, TEMPERATURE
 from prompts.financial_analysis import FINANCIAL_ANALYSIS_PROMPT
+from agents.orchestrator import PipelineError, api_errors, make_client
 from utils.models import request_params, temperature_ignored
 
 
@@ -47,13 +46,9 @@ def analyze_document(
         AnalysisResult with the analysis text and token usage.
 
     Raises:
-        SystemExit: If the API call fails.
+        PipelineError: If the API call fails or the model declines outright.
     """
-    if not ANTHROPIC_API_KEY:
-        print("❌ ANTHROPIC_API_KEY is not set. Add it to your .env file.")
-        raise SystemExit(1)
-
-    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY, timeout=REQUEST_TIMEOUT)
+    client = make_client()
 
     user_message = (
         "Analyze the following company filing and produce your full "
@@ -70,7 +65,7 @@ def analyze_document(
     if temperature_ignored(model, TEMPERATURE):
         print(f"   ℹ️  TEMPERATURE={TEMPERATURE} is not sent: {model} rejects sampling parameters.")
 
-    try:
+    with api_errors():
         response = client.messages.create(
             **params,
             system=FINANCIAL_ANALYSIS_PROMPT,
@@ -78,15 +73,6 @@ def analyze_document(
                 {"role": "user", "content": user_message}
             ],
         )
-    except anthropic.APIConnectionError as e:
-        print(f"❌ API connection error: {e}")
-        raise SystemExit(1)
-    except anthropic.RateLimitError as e:
-        print(f"❌ Rate limit exceeded: {e}")
-        raise SystemExit(1)
-    except anthropic.APIStatusError as e:
-        print(f"❌ API error (status {e.status_code}): {e.message}")
-        raise SystemExit(1)
 
     # Extract text from response content blocks
     analysis_text = ""
@@ -103,7 +89,7 @@ def analyze_document(
             # Nothing to write: a report with only a stats table would look
             # like a finished analysis.
             print("❌ The model declined this request and produced no analysis.")
-            raise SystemExit(1)
+            raise PipelineError("declined by the model", systemic=False)
         print("⚠️  Warning: The model declined partway through; the analysis is incomplete.")
     elif stop_reason == "max_tokens":
         print(

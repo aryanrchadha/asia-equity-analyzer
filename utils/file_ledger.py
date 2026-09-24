@@ -180,3 +180,16 @@ def ledger_summary(data: dict) -> tuple[int, int, int]:
             if entry.get("attempts", 0) >= WATCH_MAX_ATTEMPTS:
                 exhausted += 1
     return analyzed, failed, exhausted
+
+
+def clear_failures(data: dict) -> int:
+    """Forget every recorded failure so those filings are attempted again.
+
+    Successful analyses are kept — clearing them would re-bill work already
+    paid for. Returns how many entries were cleared.
+    """
+    failed = [digest for digest, entry in data["files"].items()
+              if entry.get("status") != "analyzed"]
+    for digest in failed:
+        del data["files"][digest]
+    return len(failed)

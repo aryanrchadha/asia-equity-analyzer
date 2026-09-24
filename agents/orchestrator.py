@@ -88,28 +88,57 @@ def _log(message: str) -> None:
         print(message)
 
 
+class PipelineError(SystemExit):
+    """The pipeline could not produce an analysis.
+
+    Subclasses SystemExit so a one-off run still exits cleanly with code 1.
+    Batch and watch runs read `systemic` to tell a failure caused by this
+    filing apart from one that would hit every filing — missing or invalid
+    credentials, rate limits, outages, a mistyped model. Counting the latter
+    against a file would, in watch mode, permanently abandon every filing in
+    the inbox over a configuration mistake.
+    """
+
+    def __init__(self, reason: str, systemic: bool):
+        super().__init__(1)
+        self.reason = reason
+        self.systemic = systemic
+
+
+# Statuses that would fail for any filing: credentials (401/403), an unknown
+# model (404), timeouts (408), rate limits (429), and server trouble (5xx).
+# Anything else — typically a 400 for an oversized or malformed request — is
+# attributed to the filing.
+_SYSTEMIC_STATUSES = {401, 403, 404, 408, 429}
+
+
+def has_credentials() -> bool:
+    return bool(ANTHROPIC_API_KEY)
+
+
 def make_client() -> anthropic.Anthropic:
     """Build the API client, exiting with guidance if the key is missing."""
-    if not ANTHROPIC_API_KEY:
+    if not has_credentials():
         print("❌ ANTHROPIC_API_KEY is not set. Add it to your .env file.")
-        raise SystemExit(1)
+        raise PipelineError("no API key configured", systemic=True)
     return anthropic.Anthropic(api_key=ANTHROPIC_API_KEY, timeout=REQUEST_TIMEOUT)
 
 
 @contextmanager
 def api_errors():
-    """Convert API failures into a clean exit with a user-facing message."""
+    """Convert API failures into a PipelineError with a user-facing message."""
     try:
         yield
     except anthropic.APIConnectionError as e:
         print(f"❌ API connection error: {e}")
-        raise SystemExit(1)
+        raise PipelineError("could not reach the API", systemic=True)
     except anthropic.RateLimitError as e:
         print(f"❌ Rate limit exceeded: {e}")
-        raise SystemExit(1)
+        raise PipelineError("rate limited", systemic=True)
     except anthropic.APIStatusError as e:
         print(f"❌ API error (status {e.status_code}): {e.message}")
-        raise SystemExit(1)
+        systemic = e.status_code >= 500 or e.status_code in _SYSTEMIC_STATUSES
+        raise PipelineError(f"API error {e.status_code}", systemic=systemic)
 
 
 def _build_system(document_text: str) -> list:
@@ -255,7 +284,7 @@ def analyze_document_multi(document_text: str, model: str = MODEL) -> MultiAnaly
         # Every agent declined. A report containing only a stats table would
         # read as a finished analysis, so write nothing and say why.
         print("❌ The model declined every part of this analysis; no report written.")
-        raise SystemExit(1)
+        raise PipelineError("declined by the model", systemic=False)
     return MultiAnalysisResult(
         text=combined_text,
         input_tokens=sum(s.input_tokens for s in sections),

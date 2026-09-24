@@ -51,6 +51,7 @@ from utils.cost_preview import estimate_group_agent, estimate_pipeline, estimate
 from utils.document_loader import find_documents, load_document
 from utils.file_ledger import (
     LedgerError,
+    clear_failures,
     load_ledger,
     ledger_summary,
     mark_analyzed,
@@ -88,7 +89,7 @@ from agents.comparator import (
     make_filing_analysis,
     rank_peers,
 )
-from agents.orchestrator import analyze_document_multi
+from agents.orchestrator import PipelineError, analyze_document_multi, has_credentials
 
 # A run of back-to-back analysis failures in batch mode means something
 # systemic is wrong (credentials, quota, network) rather than one bad file.
@@ -173,6 +174,12 @@ def parse_args() -> argparse.Namespace:
         metavar="SECONDS",
         default=WATCH_POLL_SECONDS,
         help="With --watch-dir, seconds between directory scans.",
+    )
+    parser.add_argument(
+        "--retry-failed",
+        action="store_true",
+        help="With --watch-dir, clear recorded failures first, so filings that "
+        "were given up on are attempted again.",
     )
     parser.add_argument(
         "--ledger-path",
@@ -266,6 +273,8 @@ def parse_args() -> argparse.Namespace:
             parser.error("--poll-interval must be positive.")
     elif args.once:
         parser.error("--once only applies to --watch-dir.")
+    elif args.retry_failed:
+        parser.error("--retry-failed only applies to --watch-dir.")
     if args.batch_limit is not None:
         if not args.batch:
             parser.error("--batch-limit only applies to --batch.")
@@ -414,13 +423,24 @@ def _analyze_filings(
         filing_start = time.time()
         try:
             analysis = analyze_document_multi(doc_info.text, model=model)
-        except SystemExit:
+        except SystemExit as e:
             # The pipeline exits on API failure; in batch mode that's one
-            # filing lost, not the whole run.
+            # filing lost, not the whole run — unless it's systemic.
             if not skip_failures:
                 raise
+            if getattr(e, "systemic", False):
+                print(
+                    f"❌ Stopping the batch: {e.reason}. That would fail for every "
+                    "filing, so the rest were not attempted."
+                )
+                skipped.append((doc_info.filename, e.reason))
+                skipped.extend(
+                    (d.filename, f"not attempted ({e.reason})") for d in documents[index:]
+                )
+                break
+            reason = getattr(e, "reason", "analysis failed")
             print(f"   ⏭️  Skipping '{doc_info.filename}' after the error above.\n")
-            skipped.append((doc_info.filename, "analysis failed"))
+            skipped.append((doc_info.filename, reason))
             consecutive_failures += 1
             if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
                 remaining = documents[index:]
@@ -536,24 +556,26 @@ def _analyze_one(args, path: str) -> tuple:
     """Analyze a single filing for watch mode.
 
     Returns:
-        (filing, report_path) on success, or (None, reason) on failure.
+        (filing, report_path, False) on success, or (None, reason, systemic)
+        on failure — `systemic` meaning it would have failed for any filing.
     """
     doc_info = load_document(filepath=path)
     if doc_info is None:
-        return None, "could not be loaded"
+        return None, "could not be loaded", False
 
     started = time.time()
     try:
         analysis = analyze_document_multi(doc_info.text, model=args.model)
+    except PipelineError as e:
+        return None, e.reason, e.systemic
     except SystemExit:
-        # The pipeline exits on API failure; in watch mode that's one filing
-        # to retry later, not a reason to stop watching.
-        return None, "analysis failed"
+        return None, "analysis failed", False
 
     report_path = _write_filing_report(
         doc_info, analysis, time.time() - started, export_html=args.html
     )
-    return make_filing_analysis(doc_info.filename, analysis, report_path), report_path
+    filing = make_filing_analysis(doc_info.filename, analysis, report_path)
+    return filing, report_path, False
 
 
 def _watch_pass(args, ledger: dict) -> int:
@@ -577,7 +599,16 @@ def _watch_pass(args, ledger: dict) -> int:
     handled = 0
     for path, digest in pending:
         name = os.path.basename(path)
-        filing, outcome = _analyze_one(args, path)
+        filing, outcome, systemic = _analyze_one(args, path)
+        if filing is None and systemic:
+            # Nothing about this filing caused it, and the rest of the queue
+            # would fail the same way. Counting it would, over a few passes,
+            # permanently abandon every filing because of one config mistake.
+            print(
+                f"   ⏸️  Pausing this pass: {outcome}. Nothing was counted against "
+                "the filings; they'll be retried on the next pass."
+            )
+            break
         if filing is None:
             attempts = mark_failed(ledger, digest, name, outcome)
             remaining = WATCH_MAX_ATTEMPTS - attempts
@@ -619,6 +650,16 @@ def run_watch_dir(args) -> None:
         print("   Refusing to continue: an unreadable ledger would re-analyze — and")
         print("   re-bill — every filing in the directory. Fix or move the file.")
         sys.exit(1)
+
+    if args.retry_failed:
+        cleared = clear_failures(ledger)
+        if cleared:
+            try:
+                save_ledger(ledger, args.ledger_path)
+            except OSError as e:
+                print(f"❌ Could not write ledger '{args.ledger_path}': {e}")
+                sys.exit(1)
+        print(f"🔁 Cleared {cleared} recorded failure(s); those filings will be retried.")
 
     analyzed, failed, _ = ledger_summary(ledger)
     print()
@@ -1104,6 +1145,14 @@ def main():
     if args.dry_run:
         run_dry_run(args)
         return
+    if not has_credentials():
+        # Checked before any loading, ledger access, or loop: a missing key
+        # otherwise surfaces per filing, and in watch mode was counted
+        # against each file's retry budget.
+        print("❌ ANTHROPIC_API_KEY is not set. Add it to your .env file:")
+        print('   echo "ANTHROPIC_API_KEY=sk-ant-..." > .env')
+        print("   (--dry-run, --show-watchlist and --export-html work without one.)")
+        sys.exit(1)
     if args.compare:
         run_comparison(args)
         return

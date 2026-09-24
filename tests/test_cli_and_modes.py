@@ -108,7 +108,9 @@ class ModeTest(unittest.TestCase):
             self.analyses.append(text)
             return make_analysis()
 
+        self.working_pipeline = fake_pipeline
         main.analyze_document_multi = fake_pipeline
+        main.has_credentials = lambda: True
         main.analyze_trajectory = lambda *a, **k: stub_section()
         main.analyze_peers = lambda *a, **k: stub_section()
         main.analyze_sector = lambda *a, **k: stub_section()
