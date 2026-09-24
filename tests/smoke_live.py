@@ -6,11 +6,13 @@ sector statistics, watchlist alerts — reads scores out of the report text by
 looking for `SCORE: X/N` and `RATING: X` lines. The stubbed suite proves the
 parsers work; only this proves the prompts actually produce what they parse.
 
-This costs real money, so it is NOT part of `unittest discover`. Run it
-deliberately:
+It makes real model calls — on your Claude plan with the default claude-code
+backend, or billed to ANTHROPIC_API_KEY with --backend api — so it is NOT part
+of `unittest discover`. Run it deliberately:
 
     python tests/smoke_live.py                    # ~4KB fixture filing
     python tests/smoke_live.py --file real.pdf    # a filing of your own
+    python tests/smoke_live.py --backend api      # via the API instead
 
 Exits 0 if the contract holds, 1 if any part of it is violated, and 2 if it
 could not run (no credentials, no SDK).
@@ -31,7 +33,7 @@ PASS = "✅"
 FAIL = "❌"
 
 
-def preflight() -> None:
+def preflight(backend: str | None) -> None:
     """Exit(2) with actionable guidance unless a live run is actually possible."""
     try:
         import anthropic  # noqa: F401
@@ -40,17 +42,20 @@ def preflight() -> None:
         print("   pip install -r requirements.txt")
         sys.exit(2)
 
-    from config import ANTHROPIC_API_KEY
+    from agents import orchestrator
 
-    if not ANTHROPIC_API_KEY:
-        print("❌ No API key found.")
-        print("   Set ANTHROPIC_API_KEY, or put it in a .env file:")
-        print('   echo "ANTHROPIC_API_KEY=sk-ant-..." > .env')
+    if backend:
+        orchestrator.set_backend(backend)
+    if not orchestrator.has_credentials():
+        for line in orchestrator.credentials_help():
+            print(line)
         sys.exit(2)
 
 
 def check(label: str, ok: bool, detail: str = "") -> bool:
-    print(f"   {PASS if ok else FAIL} {label}{f' — {detail}' if detail else ''}")
+    # The detail explains a failure; on a pass it would read as one.
+    shown = f" — {detail}" if detail and not ok else ""
+    print(f"   {PASS if ok else FAIL} {label}{shown}")
     return ok
 
 
@@ -123,12 +128,14 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--file", default=FIXTURE, help="Filing to analyze.")
     parser.add_argument("--model", default=None, help="Override the configured model.")
+    parser.add_argument("--backend", choices=("claude-code", "api"), default=None,
+                        help="Override the configured backend (ANALYZER_BACKEND).")
     args = parser.parse_args()
 
-    preflight()
+    preflight(args.backend)
 
     from config import MODEL
-    from agents.orchestrator import analyze_document_multi
+    from agents.orchestrator import analyze_document_multi, current_backend, uses_plan_usage
     from utils.document_loader import load_document
     from utils.report_writer import write_report
 
@@ -138,7 +145,11 @@ def main() -> int:
     print("=" * 60)
     print(f"  Filing: {args.file}")
     print(f"  Model:  {model}")
-    print("  This makes real API calls and costs real money.\n")
+    print(f"  Backend: {current_backend()}")
+    if uses_plan_usage():
+        print("  This makes real model calls against your Claude plan's usage.\n")
+    else:
+        print("  This makes real API calls and costs real money.\n")
 
     doc = load_document(filepath=args.file)
     if doc is None:
@@ -175,7 +186,8 @@ def main() -> int:
     print("─" * 60)
     print(f"  Report:     {report_path}")
     print(f"  Model:      {analysis.model}")
-    print(f"  Est. cost:  ${cost:.4f}")
+    cost_label = "API-equiv.:" if uses_plan_usage() else "Est. cost: "
+    print(f"  {cost_label} ${cost:.4f}")
     print(f"  Elapsed:    {elapsed:.1f}s")
     print(f"  Contract:   {'HOLDS' if ok else 'VIOLATED'}")
     print("─" * 60)

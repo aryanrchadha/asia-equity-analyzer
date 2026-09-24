@@ -26,7 +26,8 @@ Built for analysts covering **Greater China, Southeast Asia, Korea, Taiwan, and 
 ### Prerequisites
 
 - Python 3.11+
-- An [Anthropic API key](https://console.anthropic.com/)
+- A Claude plan (Pro or Max) with [Claude Code](https://code.claude.com) installed and logged in — **the default**; analyses run on your plan's usage, with no API key and no per-token bill
+- *or* an [Anthropic API key](https://console.anthropic.com/), if you'd rather pay per token (`--backend api`)
 
 ### Installation
 
@@ -41,9 +42,30 @@ source venv/bin/activate
 # Install dependencies
 pip install -r requirements.txt
 
-# Set your API key
-echo "ANTHROPIC_API_KEY=sk-ant-your-key-here" > .env
+# Default backend: your Claude plan, through the Claude Code CLI.
+# Install it and log in once (opens a browser to sign in to your Claude account):
+npm install -g @anthropic-ai/claude-code
+claude
+
+# Optional — only for the API backend:
+# echo "ANTHROPIC_API_KEY=sk-ant-your-key-here" > .env
+# echo "ANALYZER_BACKEND=api" >> .env
 ```
+
+### Backends: your Claude plan or the API
+
+| | `claude-code` (default) | `api` |
+|---|---|---|
+| Runs on | Your Claude plan's usage, via `claude -p` | `ANTHROPIC_API_KEY`, billed per token |
+| Needs | Claude Code installed and logged in | An API key |
+| Cost figures in reports | API-equivalent, marked *not billed* | Estimated bill |
+| Limits | Your plan's usage limits | Your API rate limits |
+
+Pick per run with `--backend claude-code|api`, or set `ANALYZER_BACKEND` in `.env`. If `ANTHROPIC_API_KEY` is also set, the claude-code backend strips it from the CLI's environment, so the run can't bill that key by accident. Point `CLAUDE_CLI` at the binary if `claude` isn't on your `PATH`.
+
+Each call is a single tool-less turn: the analyzer's own prompt replaces Claude Code's, and no tools, settings, hooks, MCP servers or `CLAUDE.md` files are loaded. The filing goes in on stdin, not as an argument, because annual reports are larger than the OS limit on a single argument. Claude Code thinks on every model, so its output budget is raised to 16,000 tokens, and output is read turn by turn: if a response runs long, the CLI continues in a second turn, and its summary field only holds that last turn.
+
+This backend is meant for your own use on your own machine, under your own Claude login. For anything shared or automated (such as the GitHub Actions smoke test), use the API backend.
 
 ## Usage
 
@@ -148,7 +170,7 @@ Two behaviours exist specifically to avoid wasting money:
 
 - **Files must settle before analysis.** A filing whose mtime is newer than `WATCH_SETTLE_SECONDS` (10s) is left alone until the next pass, so a PDF still being copied or downloaded isn't analyzed half-written into a garbage report at full cost.
 - **Failures retry, but not forever.** A failed filing is retried on later passes — transient rate limits and network blips shouldn't lose a filing — but after `WATCH_MAX_ATTEMPTS` (3) attempts it's given up on, so a permanently corrupt file can't bill you on every poll for the rest of the week.
-- **Only the filing's own failures count.** A missing or invalid API key, a rate limit, an outage, or a mistyped model would fail every filing alike, so they never count against a file — otherwise one configuration mistake would, within three polls, permanently abandon the whole inbox. Transient ones (rate limits, outages) pause the pass and retry on the next poll; ones only a restart can fix (a missing or rejected key, an unknown model — both are read at startup) stop the watcher with exit code 1 rather than logging the same error every poll. A file-specific failure (for example a 400 on an oversized document) still counts.
+- **Only the filing's own failures count.** A missing or invalid API key, a logged-out Claude Code, a usage or rate limit, an outage, or a mistyped model would fail every filing alike, so they never count against a file — otherwise one configuration mistake would, within three polls, permanently abandon the whole inbox. Transient ones (rate limits, outages) pause the pass and retry on the next poll; ones only a restart can fix (a missing or rejected key, a logged-out or missing Claude Code CLI, an unknown model) stop the watcher with exit code 1 rather than logging the same error every poll. A file-specific failure (for example a 400 on an oversized document) still counts.
 - **`--retry-failed`** forgets the recorded failures (successful analyses are kept) so given-up filings are attempted again, e.g. after fixing whatever broke them:
   ```bash
   python main.py --watch-dir ./inbox --once --retry-failed
@@ -260,7 +282,8 @@ asia-equity-analyzer/
 ├── main.py                  # CLI entry point
 ├── config.py                # Model settings, dirs, cost constants
 ├── agents/
-│   ├── analyst.py           # Single-agent mode (one Claude API call)
+│   ├── analyst.py           # Single-agent mode (one model call)
+│   ├── claude_code.py       # claude-code backend: model calls via `claude -p` on your plan
 │   ├── orchestrator.py      # Multi-agent mode: 6 parallel specialists + synthesis
 │   └── comparator.py        # Cross-period comparison: score deltas + trajectory agent
 ├── prompts/
@@ -278,13 +301,13 @@ asia-equity-analyzer/
 │   └── watchlist.py         # Persistent score history + move alerts
 ├── tests/                   # Stdlib test suite + live contract smoke test
 │   ├── support.py           # Stubs, fakes, report builders
-│   ├── smoke_live.py        # Live prompt-contract check (needs an API key)
+│   ├── smoke_live.py        # Live prompt-contract check (real model calls)
 │   └── fixtures/            # Synthetic filing used by the smoke test
 ├── watchlist.json           # Score history (created on first --watch run)
 ├── processed.json           # Analyzed-filing ledger (created by --watch-dir)
 ├── input/                   # Drop files here
 ├── output/                  # Reports appear here
-├── .env                     # API key (gitignored)
+├── .env                     # Optional settings / API key (gitignored)
 ├── .gitignore
 ├── requirements.txt
 └── README.md
@@ -304,18 +327,21 @@ It covers the pipeline itself (driven through a fake API client: cache breakpoin
 
 ### Live contract test
 
-The stubbed suite proves the parsers work; it cannot prove the **prompts produce what those parsers read**. Everything downstream — comparison deltas, peer ranking, sector statistics, watchlist alerts — depends on the specialists actually emitting `SCORE: X/N` and `RATING: X` lines. That needs a real API call:
+The stubbed suite proves the parsers work; it cannot prove the **prompts produce what those parsers read**. Everything downstream — comparison deltas, peer ranking, sector statistics, watchlist alerts — depends on the specialists actually emitting `SCORE: X/N` and `RATING: X` lines. That needs real model calls. With the default backend these run on your Claude plan:
 
 ```bash
-python tests/smoke_live.py                   # ~4KB fixture filing, a few cents
+python tests/smoke_live.py                   # ~4KB fixture filing, ~4 minutes
 python tests/smoke_live.py --file real.pdf   # a filing of your own
+python tests/smoke_live.py --backend api     # via the API instead (a few cents)
 ```
 
-It runs one filing through the real pipeline and checks the contract line by line: all ten sections present, every score parseable and in range, a governance rating from the allowed set, a composite that is actually consistent with the dimension scores it claims to weight, and a ranking table that renders without `n/a` cells. Exit codes: `0` contract holds, `1` violated (with the offending item named), `2` couldn't run (no key or SDK).
+It has been run on the claude-code backend with `claude-sonnet-4-6`, and the contract holds: all ten sections, every score parsed, and no `n/a` cells in the ranking or sector tables.
+
+It runs one filing through the real pipeline and checks the contract line by line: all ten sections present, every score parseable and in range, a governance rating from the allowed set, a composite that is actually consistent with the dimension scores it claims to weight, and a ranking table that renders without `n/a` cells. Exit codes: `0` contract holds, `1` violated (with the offending item named), `2` couldn't run (no backend available, or no SDK).
 
 Run this after any change to the prompts in `prompts/`. A violated contract doesn't crash anything — it silently degrades the aggregate tables to `n/a`, which is exactly the kind of failure worth a deliberate check.
 
-It can also be run from GitHub: **Actions → Live contract smoke test → Run workflow**, once an `ANTHROPIC_API_KEY` repository secret exists. That workflow is manual-only — it spends money, so nothing triggers it automatically — and it uploads the generated report as an artifact whether or not the contract held, since a failed run is exactly when you want to read the report.
+It can also be run from GitHub: **Actions → Live contract smoke test → Run workflow**, once an `ANTHROPIC_API_KEY` repository secret exists. CI has no Claude login, so that workflow always uses the API backend. It is manual-only — it spends money, so nothing triggers it automatically — and it uploads the generated report as an artifact whether or not the contract held, since a failed run is exactly when you want to read the report.
 
 ## Choosing a Model
 
@@ -333,6 +359,8 @@ Using Claude Sonnet 4.6 pricing ($3/M input, $15/M output); other models are pri
 
 | Report Size | Input Tokens | Output Tokens | Approx. Cost |
 |-------------|-------------|---------------|--------------|
+On the default claude-code backend nothing is billed; these figures show the API-equivalent value of the usage a run draws from your plan.
+
 | Short (30 pages) | ~15,000 | ~6,000 | ~$0.14 |
 | Medium (80 pages) | ~40,000 | ~8,000 | ~$0.24 |
 | Long (200+ pages) | ~80,000 | ~8,000 | ~$0.36 |
@@ -377,8 +405,9 @@ Each report includes an **Agent Breakdown** table with per-agent token usage and
 - ✅ **Week 8** — directory watch (`--watch-dir`): analyze filings as they land, with a content-hashed ledger so nothing is analyzed twice
 - ✅ **Week 9** — test suite (99 stdlib tests) plus `tests/smoke_live.py`, the live prompt-contract check
 - ✅ **Week 10** — model-aware requests and pricing, refusal and truncation surfaced in saved reports, `--dry-run` cost preview
-- ✅ **Week 10.5** — config and outage failures no longer count against filings in watch mode; runs without an API key fail fast; `--retry-failed`
-- 🗓️ **Week 11** — run the live smoke test against a real filing (needs an API key) and tune whichever prompts drift from the contract
+- ✅ **Week 10.5** — config and outage failures no longer count against filings in watch mode; runs without a backend fail fast; `--retry-failed`
+- ✅ **Week 11** — `claude-code` backend (the default): runs on your Claude plan through the Claude Code CLI, with no API key needed. First live smoke test run: the contract holds
+- 🗓️ **Week 12** — run the smoke test on real annual reports (PDFs, CJK filings) and tune any prompts that drift
 
 ## License
 

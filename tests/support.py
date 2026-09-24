@@ -40,6 +40,11 @@ def install_stubs() -> None:
     The suite never touches the network; live behavior is covered separately
     by tests/smoke_live.py, which needs real credentials.
     """
+    # Pin the API backend, whose client every test replaces with a fake. The
+    # default claude-code backend would start a real `claude` process — and
+    # spend the user's plan usage — from any test that forgot to stub it.
+    # Tests of the claude-code backend opt in explicitly with set_backend().
+    os.environ["ANALYZER_BACKEND"] = "api"
     if "anthropic" not in sys.modules:
         anthropic = types.ModuleType("anthropic")
         anthropic.Anthropic = FakeAnthropic

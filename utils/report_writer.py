@@ -10,6 +10,19 @@ from datetime import datetime
 from config import MAX_DOCUMENT_CHARS, MODEL, OUTPUT_DIR
 
 
+def _plan_usage() -> bool:
+    """True when the run drew on a Claude plan, so the dollar figure wasn't billed."""
+    from agents.orchestrator import uses_plan_usage  # lazy: agents import utils
+
+    return uses_plan_usage()
+
+
+def _cost_banner(cost: float) -> str:
+    if _plan_usage():
+        return f"API-equivalent: ${cost:.4f} (Claude plan)"
+    return f"Cost: ${cost:.4f}"
+
+
 # Leaves room for the prefix ("comparison_"), timestamp, and extension inside
 # the 255-byte filename limit common to ext4, APFS, and NTFS.
 MAX_NAME_BYTES = 120
@@ -146,7 +159,11 @@ def write_report(
             f"| Cache Write Tokens | {cache_creation_tokens:,} |\n"
             f"| Cache Read Tokens | {cache_read_tokens:,} |\n"
         )
-    cost_label = "Estimated API Cost" + (" ⚠️" if pricing_uncertain else "")
+    cost_label = (
+        "API-Equivalent Cost (not billed — ran on your Claude plan)"
+        if _plan_usage()
+        else "Estimated API Cost"
+    ) + (" ⚠️" if pricing_uncertain else "")
     cost_footnote = (
         f"\n*⚠️ No published pricing on file for {model_span}; the estimate uses the "
         f"config constants (calibrated for {default_model_span}) and may not match the bill.*\n"
@@ -216,6 +233,7 @@ original_chars: {original_chars}
 was_truncated: {str(was_truncated).lower()}
 elapsed_seconds: {elapsed_seconds:.1f}
 estimated_cost_usd: {estimated_cost:.4f}
+billed_to: {"claude-plan" if _plan_usage() else "api"}
 pricing_uncertain: {str(pricing_uncertain).lower()}
 incomplete_sections: {json.dumps([title for title, _ in (incomplete_sections or [])], ensure_ascii=False)}
 ---
@@ -225,7 +243,7 @@ incomplete_sections: {json.dumps([title for title, _ in (incomplete_sections or 
     banner = (
         f"> **Asia Equity Analyzer** — Generated {date_display}\n"
         f"> Source: {source_span} | Model: {model_span} | "
-        f"Tokens: {total_tokens:,} | Cost: ${estimated_cost:.4f}\n\n---\n\n"
+        f"Tokens: {total_tokens:,} | {_cost_banner(estimated_cost)}\n\n---\n\n"
     )
 
     full_report = yaml_header + banner + incomplete_block + stats_table + analysis_text
@@ -310,6 +328,7 @@ output_tokens: {output_tokens}
 total_tokens: {total_tokens}
 elapsed_seconds: {elapsed_seconds:.1f}
 estimated_cost_usd: {estimated_cost:.4f}
+billed_to: {"claude-plan" if _plan_usage() else "api"}
 pricing_uncertain: {str(pricing_uncertain).lower()}
 ---
 
@@ -321,7 +340,7 @@ pricing_uncertain: {str(pricing_uncertain).lower()}
 
     body = f"""\
 > **Asia Equity Analyzer — {banner_title}** — Generated {date_display}
-> {unit_label_plural}: {len(filings)} | Model: {model_span} | Tokens: {total_tokens:,} | Cost: ${estimated_cost:.4f}
+> {unit_label_plural}: {len(filings)} | Model: {model_span} | Tokens: {total_tokens:,} | {_cost_banner(estimated_cost)}
 
 ---
 

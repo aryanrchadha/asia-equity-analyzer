@@ -5,7 +5,17 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# API Configuration
+# Backend: where model calls go.
+#   "claude-code" (default) — runs each call through the Claude Code CLI
+#       (`claude -p`), drawing on your logged-in Claude plan's usage. Log in
+#       once with `claude`; no API key is needed or used.
+#   "api" — calls the Anthropic API directly, billed to ANTHROPIC_API_KEY.
+# Override per run with --backend, or set ANALYZER_BACKEND in .env.
+BACKEND = os.getenv("ANALYZER_BACKEND", "claude-code")
+BACKENDS = ("claude-code", "api")
+CLAUDE_CLI = os.getenv("CLAUDE_CLI", "claude")   # path to the Claude Code binary
+
+# API Configuration (only used by the "api" backend)
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 
 # Model Configuration

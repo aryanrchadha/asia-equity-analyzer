@@ -38,6 +38,8 @@ import time
 import unicodedata
 
 from config import (
+    BACKEND,
+    BACKENDS,
     MAX_TOKENS,
     MODEL,
     LEDGER_PATH,
@@ -89,7 +91,14 @@ from agents.comparator import (
     make_filing_analysis,
     rank_peers,
 )
-from agents.orchestrator import PipelineError, analyze_document_multi, has_credentials
+from agents.orchestrator import (
+    PipelineError,
+    analyze_document_multi,
+    credentials_help,
+    has_credentials,
+    set_backend,
+    uses_plan_usage,
+)
 
 # A run of back-to-back analysis failures in batch mode means something
 # systemic is wrong (credentials, quota, network) rather than one bad file.
@@ -186,6 +195,14 @@ def parse_args() -> argparse.Namespace:
         metavar="PATH",
         default=LEDGER_PATH,
         help="Path to the JSON record of which filings have been analyzed.",
+    )
+    parser.add_argument(
+        "--backend",
+        choices=BACKENDS,
+        default=BACKEND if BACKEND in BACKENDS else None,
+        help="Where model calls go: 'claude-code' (default) runs them through the "
+        "Claude Code CLI on your logged-in Claude plan; 'api' bills ANTHROPIC_API_KEY. "
+        "Default from ANALYZER_BACKEND.",
     )
     parser.add_argument(
         "--dry-run",
@@ -501,10 +518,16 @@ def _print_group_summary(
     print(f"  Model:          {model}")
     total = input_tokens + cache_creation + cache_read + output_tokens
     print(f"  Total tokens:   {total:,}")
-    print(f"  Est. cost:      ${total_cost:.4f}")
+    print(f"  {_cost_line(total_cost)}")
     print(f"  Time elapsed:   {elapsed:.1f}s")
     print("─" * 60)
     print()
+
+
+def _cost_line(cost: float) -> str:
+    if uses_plan_usage():
+        return f"API-equiv. cost: ${cost:.4f} (not billed — uses your Claude plan)"
+    return f"Est. cost:      ${cost:.4f}"
 
 
 def _record_watchlist(args, records: list) -> None:
@@ -1146,6 +1169,9 @@ def run_dry_run(args) -> None:
     print("  Estimates, not quotes: tokens assume ~3.5 characters each (1 per CJK")
     print("  character), 'Expected' assumes each agent uses ~40% of its output budget,")
     print("  and 'Ceiling' assumes every agent uses all of it.")
+    if uses_plan_usage():
+        print("  Backend claude-code: these are API-equivalent figures. Nothing is billed;")
+        print("  the run draws on your Claude plan's usage limits instead.")
     print()
 
     if unreadable and fatal:
@@ -1154,6 +1180,11 @@ def run_dry_run(args) -> None:
 
 def main():
     args = parse_args()
+    if args.backend is None:
+        print(f"❌ ANALYZER_BACKEND={BACKEND!r} is not a backend; use one of: "
+              f"{', '.join(BACKENDS)}.")
+        sys.exit(1)
+    set_backend(args.backend)
 
     if args.export_html:
         run_export_html(args)
@@ -1168,8 +1199,8 @@ def main():
         # Checked before any loading, ledger access, or loop: a missing key
         # otherwise surfaces per filing, and in watch mode was counted
         # against each file's retry budget.
-        print("❌ ANTHROPIC_API_KEY is not set. Add it to your .env file:")
-        print('   echo "ANTHROPIC_API_KEY=sk-ant-..." > .env')
+        for line in credentials_help():
+            print(line)
         print("   (--dry-run, --show-watchlist and --export-html work without one.)")
         sys.exit(1)
     if args.compare:
@@ -1268,7 +1299,7 @@ def main():
     print(f"  Output tokens:  {analysis.output_tokens:,}")
     total = analysis.input_tokens + cache_creation + cache_read + analysis.output_tokens
     print(f"  Total tokens:   {total:,}")
-    print(f"  Est. cost:      ${cost:.4f}")
+    print(f"  {_cost_line(cost)}")
     print(f"  Time elapsed:   {elapsed:.1f}s")
     print("─" * 60)
     print()

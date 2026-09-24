@@ -44,6 +44,9 @@ jobs:
       - name: Run the contract check
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          # CI has no logged-in Claude plan, so this workflow uses the API.
+          # Locally, the default claude-code backend runs on your plan instead.
+          ANALYZER_BACKEND: api
         run: |
           if [ -n "${{ inputs.model }}" ]; then
             python tests/smoke_live.py --model "${{ inputs.model }}"

@@ -17,8 +17,12 @@ import time
 
 import anthropic
 
+from agents.claude_code import ClaudeCodeClient, ClaudeCodeError, cli_available
 from config import (
     ANTHROPIC_API_KEY,
+    BACKEND,
+    BACKENDS,
+    CLAUDE_CLI,
     MODEL,
     REQUEST_TIMEOUT,
     SPECIALIST_MAX_TOKENS,
@@ -117,16 +121,68 @@ _SYSTEMIC_STATUSES = {401, 403, 404, 408, 429}
 _RESTART_STATUSES = {401, 403, 404}
 
 
+_backend = BACKEND
+
+
+def set_backend(name: str) -> None:
+    """Choose where model calls go for the rest of the process."""
+    global _backend
+    if name not in BACKENDS:
+        raise ValueError(f"unknown backend {name!r}; choose from {', '.join(BACKENDS)}")
+    _backend = name
+
+
+def current_backend() -> str:
+    return _backend
+
+
+def uses_plan_usage() -> bool:
+    """True when calls draw on a Claude plan, so dollar figures aren't billed."""
+    return _backend == "claude-code"
+
+
 def has_credentials() -> bool:
+    """Whether the selected backend can be reached at all (checked before any work)."""
+    if _backend == "claude-code":
+        return cli_available(CLAUDE_CLI)
     return bool(ANTHROPIC_API_KEY)
 
 
-def make_client() -> anthropic.Anthropic:
-    """Build the API client, exiting with guidance if the key is missing."""
+def credentials_help() -> list[str]:
+    """What to tell the user when has_credentials() is False."""
+    if _backend == "claude-code":
+        return [
+            f"❌ The Claude Code CLI ('{CLAUDE_CLI}') was not found on PATH.",
+            "   Install it and log in once with your Claude account:",
+            "     npm install -g @anthropic-ai/claude-code && claude",
+            "   Or point CLAUDE_CLI at the binary, or use --backend api with an API key.",
+        ]
+    return [
+        "❌ ANTHROPIC_API_KEY is not set. Add it to your .env file:",
+        '   echo "ANTHROPIC_API_KEY=sk-ant-..." > .env',
+        "   Or use --backend claude-code to run on your Claude plan instead.",
+    ]
+
+
+def make_client():
+    """Build the client for the selected backend, exiting with guidance if unusable."""
     if not has_credentials():
-        print("❌ ANTHROPIC_API_KEY is not set. Add it to your .env file.")
-        raise PipelineError("no API key configured", systemic=True, needs_restart=True)
+        for line in credentials_help():
+            print(line)
+        reason = ("Claude Code CLI not found" if _backend == "claude-code"
+                  else "no API key configured")
+        raise PipelineError(reason, systemic=True, needs_restart=True)
+    if _backend == "claude-code":
+        return ClaudeCodeClient(CLAUDE_CLI, timeout=REQUEST_TIMEOUT)
     return anthropic.Anthropic(api_key=ANTHROPIC_API_KEY, timeout=REQUEST_TIMEOUT)
+
+
+def _status_error(status: int, reason: str) -> PipelineError:
+    return PipelineError(
+        reason,
+        systemic=status >= 500 or status in _SYSTEMIC_STATUSES,
+        needs_restart=status in _RESTART_STATUSES,
+    )
 
 
 @contextmanager
@@ -134,6 +190,19 @@ def api_errors():
     """Convert API failures into a PipelineError with a user-facing message."""
     try:
         yield
+    except ClaudeCodeError as e:
+        print(f"❌ {e.reason}")
+        if e.status is not None:
+            raise _status_error(e.status, f"API error {e.status}") from None
+        if e.kind in ("missing", "auth"):
+            if e.kind == "auth":
+                print("   Log in to Claude Code once by running `claude` in a terminal.")
+            raise PipelineError("Claude Code is not logged in" if e.kind == "auth"
+                                else "Claude Code CLI not found",
+                                systemic=True, needs_restart=True) from None
+        if e.kind == "too_long":
+            raise PipelineError("filing too long for the model", systemic=False) from None
+        raise PipelineError("Claude Code call failed", systemic=True) from None
     except anthropic.APIConnectionError as e:
         print(f"❌ API connection error: {e}")
         raise PipelineError("could not reach the API", systemic=True)
@@ -142,12 +211,7 @@ def api_errors():
         raise PipelineError("rate limited", systemic=True)
     except anthropic.APIStatusError as e:
         print(f"❌ API error (status {e.status_code}): {e.message}")
-        systemic = e.status_code >= 500 or e.status_code in _SYSTEMIC_STATUSES
-        raise PipelineError(
-            f"API error {e.status_code}",
-            systemic=systemic,
-            needs_restart=e.status_code in _RESTART_STATUSES,
-        )
+        raise _status_error(e.status_code, f"API error {e.status_code}")
 
 
 def _build_system(document_text: str) -> list:
@@ -165,7 +229,7 @@ def _build_system(document_text: str) -> list:
 
 
 def _call(
-    client: anthropic.Anthropic,
+    client,
     system,
     user_content: str,
     model: str,
@@ -199,7 +263,7 @@ def _call(
 
 
 def _run_specialist(
-    client: anthropic.Anthropic,
+    client,
     spec: SpecialistSpec,
     system,
     model: str,

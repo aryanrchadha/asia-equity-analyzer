@@ -18,7 +18,7 @@ from dataclasses import dataclass
 
 from config import SPECIALIST_MAX_TOKENS, SYNTHESIS_MAX_TOKENS
 from prompts.section_prompts import BASE_ANALYST_CONTEXT, SPECIALISTS, SYNTHESIS_INSTRUCTIONS
-from utils.models import estimate_cost, profile_for, request_params
+from utils.models import THINKING_OUTPUT_BUDGET, estimate_cost, profile_for, request_params
 
 # English financial prose runs ~3.5-4 characters per token; the low end is used
 # so estimates err high. CJK characters are roughly a token each.
@@ -72,7 +72,13 @@ def estimate_tokens(text: str, model: str | None = None) -> int:
 
 def _budget(model: str, configured: int) -> int:
     """The output budget the request will actually carry for this model."""
-    return request_params(model, configured, None)["max_tokens"]
+    from agents.orchestrator import uses_plan_usage  # lazy: agents import utils
+
+    budget = request_params(model, configured, None)["max_tokens"]
+    if uses_plan_usage():
+        # The Claude Code CLI thinks on every model (see agents/claude_code.py).
+        budget = max(budget, THINKING_OUTPUT_BUDGET)
+    return budget
 
 
 def estimate_pipeline(document_text: str, model: str) -> Estimate:
